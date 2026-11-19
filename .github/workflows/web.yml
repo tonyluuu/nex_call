@@ -1,0 +1,59 @@
+name: web
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'web/**'
+      - '.github/workflows/web.yml'
+
+concurrency:
+  group: deploy-vps
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: 构建网页
+        working-directory: web
+        run: npm ci && npm run build
+
+      - name: 配置 SSH
+        env:
+          VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_SSH_PORT: ${{ secrets.VPS_SSH_PORT }}
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$VPS_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          if [ -z "${VPS_SSH_PORT}" ]; then
+            port=22
+          else
+            port="$VPS_SSH_PORT"
+          fi
+          echo "VPS_PORT=$port" >> "$GITHUB_ENV"
+          ssh-keyscan -p "$port" -H "$VPS_HOST" >> ~/.ssh/known_hosts
+
+      - name: 同步网页到 VPS
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          export RSYNC_RSH="ssh -i $HOME/.ssh/deploy_key -p $VPS_PORT -o IdentitiesOnly=yes"
+          ssh_cmd=(ssh -i "$HOME/.ssh/deploy_key" -p "$VPS_PORT" -o IdentitiesOnly=yes)
+          target="$VPS_USER@$VPS_HOST"
+          "${ssh_cmd[@]}" "$target" 'mkdir -p /opt/nex_call/web/dist'
+          rsync -az --delete web/dist/ "$target:/opt/nex_call/web/dist/"
