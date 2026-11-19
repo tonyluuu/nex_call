@@ -206,7 +206,7 @@ setup_pulse() {
     pactl load-module module-echo-cancel aec_method=webrtc use_master_format=1 \
       sink_master="$usb_sink" source_master=usb-mic-mono \
       sink_name=echo-cancel-sink source_name=echo-cancel-source \
-      aec_args="high_pass_filter=1 noise_suppression=1 analog_gain_control=0 digital_gain_control=1 extended_filter=1"
+      'aec_args="high_pass_filter=1 noise_suppression=1 analog_gain_control=0 digital_gain_control=1 extended_filter=1"'
     # USB 小麦克风硬件拉满仍偏小，再加约 10 dB 软件增益
     pactl set-source-volume usb-mic-mono 150%
     python3 - "$usb_sink" "$usb_src" << 'PY'
