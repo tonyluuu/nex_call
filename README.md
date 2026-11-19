@@ -47,6 +47,19 @@ nex_call/
 
 网页、接口、信令和 LiveKit 都挂在 `/nexcall` 下。香橙派的 `SERVER_URL` 也要带这个前缀。
 
+### 自动部署
+
+首次部署仍按上面 1–8 步完成：VPS 上要先有 Docker、`/opt/nex_call/deploy/.env` 和证书，SSH 用户要能写 `/opt/nex_call` 并执行 `docker`。之后推送到 `main`，或在 Actions 页手动运行 `deploy`，会构建并更新服务端和网页，同时打出同一次提交的 device-agent。
+
+仓库 Secrets：
+
+- `VPS_HOST`：公网 IP
+- `VPS_USER`：SSH 用户
+- `VPS_SSH_KEY`：私钥全文（含 BEGIN/END 行，不能带口令）
+- `VPS_SSH_PORT`：可选，默认 22
+
+工作流同步 `web/dist`、`server/`、`deploy/`（排除 `.env`、`certs/`、`acme/`、`lego/`），载入镜像 `nex-call-call-server:latest` 后执行 `docker compose up -d --no-build`。不修改 `.env`、证书、SQLite 数据卷，也不改安全组或续期 crontab。`device-agent` 上传为 artifact `device-agent-linux-arm64`，并放到 VPS `/opt/nex_call/dist/device-agent`。香橙派不会被自动安装或重启。
+
 ### 通话方式
 
 - 每台 Pi 连上后一直待在自己的房间里，没有网页用户时麦克风静音，有人进入就开麦。网页点「进入」直接通话，Pi 不用接听。
@@ -63,6 +76,7 @@ nex_call/
 3. 编译 device-agent（任选其一）：
    - 在电脑上用 Docker 交叉编译：`cd device && docker buildx build --platform linux/arm64 -o type=local,dest=./dist .`，然后把 `dist/device-agent` 拷到香橙派。
    - 在香橙派上直接编译：`cd device && CGO_ENABLED=1 go build -tags nolibopusfile -o device-agent ./cmd/device-agent`
+   - 使用同一次服务端部署打出的二进制：在 Actions 的 `deploy` 运行里下载 artifact `device-agent-linux-arm64`，或从 VPS 拷贝 `/opt/nex_call/dist/device-agent`。派上的 `device.env` 和 systemd 不会被 Actions 修改。
 4. 安装为 systemd 服务并填写配置：
    ```bash
    ./install.sh ./device-agent
@@ -132,7 +146,7 @@ device-agent 每 10 秒打印一次 `call stats`：收发包数、丢包、FEC �
 ## 五、常见问题
 
 - 网页提示"不是 HTTPS"：浏览器只在 HTTPS 或 localhost 下开放麦克风，必须通过 `https://<公网IP>/nexcall/` 访问。
-- 从旧版升级：重新 `npm run build`，`docker compose up -d --build`，把香橙派 `SERVER_URL` 改成 `https://<公网IP>/nexcall` 后重启 device-agent。需要管理员时执行 `call-server user role <用户名> admin`。旧的一对一振铃呼叫不再使用。
+- 从旧版升级：推送到 `main` 后，服务端和网页由 Actions 自动更新。香橙派换上同一次构建的 `device-agent` 后执行 `sudo systemctl restart device-agent`。`SERVER_URL` 须为 `https://<公网IP>/nexcall`。需要管理员时执行 `call-server user role <用户名> admin`。旧的一对一振铃呼叫不再使用。
 - 能登录但通话无声：检查安全组是否放通 UDP 7882 / TCP 7881，以及 LiveKit 日志里的 `nodeIP` 是否为公网 IP。
 - 设备一直重连并提示 `unauthorized`：`DEVICE_SECRET` 不对，重新执行 `call-server device add` 生成新密钥。
 - 自签名证书兜底时：把服务器的 `deploy/certs/fullchain.pem` 拷到香橙派，在 `device.env` 里设置 `CA_CERT`。

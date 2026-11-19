@@ -21,6 +21,7 @@ services:
       - call-server
 
   call-server:
+    image: nex-call-call-server:latest
     build:
       context: ../server
     restart: unless-stopped
