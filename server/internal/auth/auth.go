@@ -2,6 +2,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
@@ -10,6 +11,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/http"
 	"strconv"
 	"strings"
 	"time"
@@ -93,6 +95,7 @@ func (s *Sessions) Verify(token string) (string, error) {
 
 type LiveKit struct {
 	URL       string
+	APIURL    string
 	APIKey    string
 	APISecret string
 	TTL       time.Duration
@@ -118,4 +121,42 @@ func (l *LiveKit) RoomToken(room, identity, name string) (string, error) {
 		return "", fmt.Errorf("livekit token: %w", err)
 	}
 	return t, nil
+}
+
+// RemoveParticipant 用 Room API 把参与者移出 LiveKit 房间。
+func (l *LiveKit) RemoveParticipant(ctx context.Context, room, identity string) error {
+	if l.APIURL == "" {
+		return errors.New("LIVEKIT_API_URL not set")
+	}
+	token, err := auth.NewAccessToken(l.APIKey, l.APISecret).
+		SetVideoGrant(&auth.VideoGrant{RoomCreate: true, RoomList: true, RoomAdmin: true, Room: room}).
+		SetValidFor(time.Minute).
+		ToJWT()
+	if err != nil {
+		return err
+	}
+	client := livekit.NewRoomServiceProtobufClient(l.APIURL, &http.Client{
+		Timeout:   5 * time.Second,
+		Transport: bearerTripper{token: token},
+	})
+	_, err = client.RemoveParticipant(ctx, &livekit.RoomParticipantIdentity{Room: room, Identity: identity})
+	if err != nil {
+		return fmt.Errorf("remove participant: %w", err)
+	}
+	return nil
+}
+
+type bearerTripper struct {
+	base  http.RoundTripper
+	token string
+}
+
+func (b bearerTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	r = r.Clone(r.Context())
+	r.Header.Set("Authorization", "Bearer "+b.token)
+	base := b.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return base.RoundTrip(r)
 }

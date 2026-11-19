@@ -12,7 +12,7 @@ room:
   # 双方都离开后房间很快回收
   empty_timeout: 30
   departure_timeout: 10
-  max_participants: 4
+  max_participants: 8
 
 turn:
   enabled: true

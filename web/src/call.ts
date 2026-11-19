@@ -7,11 +7,16 @@ import {
   type RemoteTrack,
 } from 'livekit-client'
 
+export interface RemotePeer {
+  identity: string
+  speaking: boolean
+}
+
 export interface CallEvents {
-  onPeerLeft: () => void
   onDisconnected: () => void
   onAudioBlocked: (blocked: boolean) => void
   onQuality: (text: string) => void
+  onParticipants: (list: RemotePeer[]) => void
 }
 
 const qualityText: Record<string, string> = {
@@ -54,9 +59,9 @@ export class MediaCall {
       .on(RoomEvent.TrackUnsubscribed, (track: RemoteTrack) => {
         for (const el of track.detach()) el.remove()
       })
-      .on(RoomEvent.ParticipantDisconnected, (_p: RemoteParticipant) => {
-        if (this.room.remoteParticipants.size === 0) this.events.onPeerLeft()
-      })
+      .on(RoomEvent.ParticipantConnected, () => this.emitParticipants())
+      .on(RoomEvent.ParticipantDisconnected, () => this.emitParticipants())
+      .on(RoomEvent.ActiveSpeakersChanged, () => this.emitParticipants())
       .on(RoomEvent.Disconnected, () => {
         if (!this.closed) this.events.onDisconnected()
       })
@@ -72,6 +77,16 @@ export class MediaCall {
     await this.room.connect(url, token)
     await this.room.localParticipant.setMicrophoneEnabled(true)
     this.events.onAudioBlocked(!this.room.canPlaybackAudio)
+    this.emitParticipants()
+  }
+
+  private emitParticipants() {
+    const speaking = new Set(this.room.activeSpeakers.map((p) => p.identity))
+    const list: RemotePeer[] = []
+    this.room.remoteParticipants.forEach((p: RemoteParticipant) => {
+      list.push({ identity: p.identity, speaking: speaking.has(p.identity) })
+    })
+    this.events.onParticipants(list)
   }
 
   startAudio() {

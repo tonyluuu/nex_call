@@ -1,9 +1,11 @@
 // Package agent 是设备端的呼叫状态机，单协程处理信令消息、按键和媒体事件。
+// 设备连上后常驻自己的房间：没有网页用户时麦克风静音，有人进入就开麦。
 package agent
 
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"nexcall/device/internal/gpio"
 	"nexcall/device/internal/signal"
@@ -14,41 +16,34 @@ type Signaler interface {
 }
 
 type Media interface {
-	PeerLeft() <-chan struct{}
+	Occupancy() <-chan int
 	Done() <-chan struct{}
+	SetMuted(bool)
 	Close()
 }
 
 type JoinFunc func(url, token string) (Media, error)
-
-type Ringer interface {
-	Start(incoming bool)
-	Stop()
-}
 
 type Indicator interface {
 	SetPattern(gpio.Pattern)
 }
 
 type Config struct {
-	AutoAnswer bool
-	// CallTarget 为空时呼叫所有在线 Web 用户
+	DeviceID string
+	// CallTarget 短按提醒的 Web 用户名，空表示提醒所有在线用户
 	CallTarget string
 }
 
 type State int
 
 const (
-	Idle State = iota
-	Dialing
-	Calling
-	Incoming
-	Connecting
+	Offline State = iota
+	Idle
 	Active
 )
 
 func (s State) String() string {
-	return [...]string{"idle", "dialing", "calling", "incoming", "connecting", "active"}[s]
+	return [...]string{"offline", "idle", "active"}[s]
 }
 
 type joinResult struct {
@@ -57,31 +52,36 @@ type joinResult struct {
 	err   error
 }
 
-type mediaEnded struct {
-	seq    int
-	reason string
+type mediaEnded struct{ seq int }
+
+type occupancy struct {
+	seq int
+	n   int
 }
 
 type Agent struct {
-	cfg    Config
-	sig    Signaler
-	join   JoinFunc
-	ringer Ringer
-	ind    Indicator
+	cfg  Config
+	sig  Signaler
+	join JoinFunc
+	ind  Indicator
 
-	ctx     context.Context
-	events  chan any
-	online  bool
-	state   State
-	callID  string
-	media   Media
-	joinSeq int
-	// OnState 测试用的状态变化回调
-	OnState func(State)
+	ctx       context.Context
+	events    chan any
+	online    bool
+	state     State
+	room      string
+	url       string
+	token     string
+	media     Media
+	joinSeq   int
+	joining   bool
+	remote    int
+	userMuted bool
+	OnState   func(State)
 }
 
-func New(cfg Config, sig Signaler, join JoinFunc, ringer Ringer, ind Indicator) *Agent {
-	return &Agent{cfg: cfg, sig: sig, join: join, ringer: ringer, ind: ind, events: make(chan any, 8)}
+func New(cfg Config, sig Signaler, join JoinFunc, ind Indicator) *Agent {
+	return &Agent{cfg: cfg, sig: sig, join: join, ind: ind, events: make(chan any, 8)}
 }
 
 func (a *Agent) Run(ctx context.Context, msgs <-chan signal.Message, presses <-chan gpio.Press) {
@@ -90,7 +90,7 @@ func (a *Agent) Run(ctx context.Context, msgs <-chan signal.Message, presses <-c
 	for {
 		select {
 		case <-ctx.Done():
-			a.hangup()
+			a.closeMedia()
 			return
 		case m := <-msgs:
 			a.onMessage(m)
@@ -104,7 +104,7 @@ func (a *Agent) Run(ctx context.Context, msgs <-chan signal.Message, presses <-c
 
 func (a *Agent) setState(s State) {
 	if a.state != s {
-		slog.Info("call state", "from", a.state, "to", s, "call", a.callID)
+		slog.Info("call state", "from", a.state, "to", s, "room", a.room)
 	}
 	a.state = s
 	a.updateLED()
@@ -116,16 +116,14 @@ func (a *Agent) setState(s State) {
 func (a *Agent) updateLED() {
 	var p gpio.Pattern
 	switch {
+	case !a.online:
+		p = gpio.Offline
+	case a.state == Active && a.userMuted:
+		p = gpio.Incoming
 	case a.state == Active:
 		p = gpio.Active
-	case a.state == Incoming:
-		p = gpio.Incoming
-	case a.state != Idle:
-		p = gpio.Calling
-	case a.online:
-		p = gpio.Idle
 	default:
-		p = gpio.Offline
+		p = gpio.Idle
 	}
 	a.ind.SetPattern(p)
 }
@@ -140,108 +138,76 @@ func (a *Agent) onMessage(m signal.Message) {
 	switch m.Type {
 	case signal.EventConnected:
 		a.online = true
-		a.updateLED()
+		a.setState(Idle)
 	case signal.EventDisconnected:
 		a.online = false
-		// 服务端在连接断开时会结束这台设备的所有通话
-		a.toIdle()
+		a.closeMedia()
+		a.setState(Offline)
 	case "registered":
 		slog.Info("registered", "self", m.Self, "livekit", m.URL)
-	case "invite":
-		if a.state != Idle {
-			a.send(signal.Message{Type: "reject", CallID: m.CallID})
-			return
+	case "joined":
+		slog.Info("room token", "room", m.Room)
+		a.room = m.Room
+		a.url = m.URL
+		a.token = m.Token
+		if a.media == nil {
+			a.startJoin()
 		}
-		slog.Info("incoming call", "call", m.CallID, "from", m.From)
-		a.callID = m.CallID
-		a.setState(Incoming)
-		a.send(signal.Message{Type: "ringing", CallID: m.CallID})
-		if a.cfg.AutoAnswer {
-			a.accept()
-		} else {
-			a.ringer.Start(true)
-		}
-	case "outgoing":
-		if a.state == Dialing {
-			a.callID = m.CallID
-			a.setState(Calling)
-		}
-	case "ringing":
-		if m.CallID == a.callID {
-			slog.Info("remote ringing", "peer", m.Peer)
-		}
-	case "accepted":
-		if m.CallID == a.callID && (a.state == Calling || a.state == Connecting) {
-			a.ringer.Stop()
-			a.startJoin(m.URL, m.Token)
-		}
-	case "hangup":
-		if (m.CallID != "" && m.CallID == a.callID) || a.state == Dialing {
-			slog.Info("call ended by server", "call", m.CallID, "reason", m.Reason)
-			a.toIdle()
+	case "left":
+		if m.Room == a.room {
+			a.closeMedia()
+			a.remote = 0
+			a.userMuted = false
+			if a.online {
+				a.setState(Idle)
+				a.send(signal.Message{Type: "join", Room: "device:" + a.cfg.DeviceID})
+			}
 		}
 	case "error":
-		slog.Warn("server error", "reason", m.Reason, "call", m.CallID)
-		if a.state == Dialing {
-			a.toIdle()
-		}
+		slog.Warn("server error", "reason", m.Reason, "room", m.Room)
 	}
 }
 
 func (a *Agent) onPress(p gpio.Press) {
-	switch a.state {
-	case Idle:
-		if p == gpio.Short && a.online {
-			a.dial()
-		}
-	case Incoming:
-		if p == gpio.Short {
-			a.accept()
-		} else {
-			a.hangup()
-		}
-	default:
-		a.hangup()
+	if !a.online || p != gpio.Short {
+		return
 	}
-}
-
-func (a *Agent) dial() {
+	if a.state == Active {
+		a.userMuted = !a.userMuted
+		a.applyMute()
+		return
+	}
 	to := ""
 	if a.cfg.CallTarget != "" {
 		to = "web:" + a.cfg.CallTarget
 	}
-	a.setState(Dialing)
-	a.send(signal.Message{Type: "call", To: to})
-	a.ringer.Start(false)
+	a.send(signal.Message{Type: "notify", To: to})
 }
 
-func (a *Agent) accept() {
-	a.ringer.Stop()
-	a.send(signal.Message{Type: "accept", CallID: a.callID})
-	a.setState(Connecting)
-}
-
-// hangup 本地主动结束：通知服务端后回到空闲。
-func (a *Agent) hangup() {
-	if a.callID != "" {
-		typ := "hangup"
-		if a.state == Incoming {
-			typ = "reject"
-		}
-		a.send(signal.Message{Type: typ, CallID: a.callID})
+func (a *Agent) applyMute() {
+	muted := a.remote == 0 || a.userMuted
+	if a.media != nil {
+		a.media.SetMuted(muted)
 	}
-	a.toIdle()
+	if !a.online {
+		a.setState(Offline)
+		return
+	}
+	if a.remote > 0 {
+		a.setState(Active)
+	} else {
+		a.userMuted = false
+		a.setState(Idle)
+	}
 }
 
-func (a *Agent) toIdle() {
-	a.ringer.Stop()
+func (a *Agent) closeMedia() {
 	a.joinSeq++
+	a.joining = false
 	if a.media != nil {
 		a.media.Close()
 		a.media = nil
 	}
-	a.callID = ""
-	a.setState(Idle)
 }
 
 func (a *Agent) post(ev any) {
@@ -251,45 +217,92 @@ func (a *Agent) post(ev any) {
 	}
 }
 
-func (a *Agent) startJoin(url, token string) {
+func (a *Agent) startJoin() {
+	if a.joining || a.media != nil || a.url == "" || a.token == "" {
+		return
+	}
+	a.joining = true
 	a.joinSeq++
 	seq := a.joinSeq
-	a.setState(Connecting)
+	url, token := a.url, a.token
 	go func() {
-		m, err := a.join(url, token)
-		a.post(joinResult{seq: seq, media: m, err: err})
+		backoff := time.Second
+		for fails := 1; ; fails++ {
+			m, err := a.join(url, token)
+			if err == nil {
+				a.post(joinResult{seq: seq, media: m})
+				return
+			}
+			slog.Error("join media failed", "err", err)
+			if m != nil {
+				m.Close()
+			}
+			if fails >= 3 {
+				a.post(joinResult{seq: seq, err: err})
+				return
+			}
+			select {
+			case <-a.ctx.Done():
+				return
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+		}
 	}()
 }
 
 func (a *Agent) onEvent(ev any) {
 	switch e := ev.(type) {
 	case joinResult:
-		if e.seq != a.joinSeq || a.state != Connecting {
+		if e.seq != a.joinSeq {
 			if e.media != nil {
 				e.media.Close()
 			}
 			return
 		}
-		if e.err != nil {
-			slog.Error("join media failed", "err", e.err)
-			a.hangup()
+		a.joining = false
+		if e.err != nil || e.media == nil {
+			a.send(signal.Message{Type: "join", Room: "device:" + a.cfg.DeviceID})
 			return
 		}
 		a.media = e.media
-		a.setState(Active)
+		a.applyMute()
 		go func(seq int, m Media) {
-			select {
-			case <-m.PeerLeft():
-				a.post(mediaEnded{seq: seq, reason: "peer left"})
-			case <-m.Done():
-				a.post(mediaEnded{seq: seq, reason: "media disconnected"})
-			case <-a.ctx.Done():
+			for {
+				select {
+				case n, ok := <-m.Occupancy():
+					if !ok {
+						return
+					}
+					a.post(occupancy{seq: seq, n: n})
+				case <-m.Done():
+					a.post(mediaEnded{seq: seq})
+					return
+				case <-a.ctx.Done():
+					return
+				}
 			}
 		}(e.seq, e.media)
+	case occupancy:
+		if e.seq != a.joinSeq || a.media == nil {
+			return
+		}
+		a.remote = e.n
+		if e.n == 0 {
+			a.userMuted = false
+		}
+		a.applyMute()
 	case mediaEnded:
-		if e.seq == a.joinSeq && a.state == Active {
-			slog.Info("media ended", "reason", e.reason)
-			a.hangup()
+		if e.seq != a.joinSeq {
+			return
+		}
+		slog.Info("media ended, rejoining")
+		a.closeMedia()
+		a.remote = 0
+		a.userMuted = false
+		if a.online {
+			a.setState(Idle)
+			a.send(signal.Message{Type: "join", Room: "device:" + a.cfg.DeviceID})
 		}
 	}
 }

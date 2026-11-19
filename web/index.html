@@ -9,6 +9,11 @@
   <body>
     <div id="app">
       <div id="banner" class="banner hidden"></div>
+      <div id="notify-bar" class="notify hidden">
+        <span id="notify-text"></span>
+        <button id="notify-join" class="primary">进入</button>
+        <button id="notify-dismiss" class="link">忽略</button>
+      </div>
 
       <section id="login-view" class="card login hidden">
         <h1>NexCall</h1>
@@ -25,17 +30,37 @@
         <header class="topbar">
           <div class="brand">NexCall</div>
           <div class="status"><span id="conn-dot" class="dot"></span><span id="conn-text">连接中</span></div>
+          <nav class="tabs">
+            <button id="tab-call" class="link on">通话</button>
+            <button id="tab-admin" class="link hidden">管理</button>
+          </nav>
           <div class="user"><span id="user-name"></span><button id="logout" class="link">退出</button></div>
         </header>
 
-        <main>
+        <main id="call-panel">
           <h2>设备</h2>
           <ul id="device-list" class="devices"></ul>
+
+          <h2>在线用户</h2>
+          <ul id="user-list" class="devices"></ul>
+
+          <h2>进行中的通话</h2>
+          <ul id="room-list" class="devices"></ul>
 
           <h2>通话记录 <button id="refresh-calls" class="link">刷新</button></h2>
           <table class="calls">
             <thead><tr><th>时间</th><th>主叫</th><th>被叫</th><th>时长</th><th>结果</th></tr></thead>
             <tbody id="call-list"></tbody>
+          </table>
+        </main>
+
+        <main id="admin-panel" class="hidden">
+          <h2>房间</h2>
+          <ul id="admin-rooms" class="devices"></ul>
+          <h2>全部通话 <button id="refresh-admin-calls" class="link">刷新</button></h2>
+          <table class="calls">
+            <thead><tr><th>时间</th><th>主叫</th><th>被叫</th><th>时长</th><th>结果</th></tr></thead>
+            <tbody id="admin-call-list"></tbody>
           </table>
         </main>
       </section>
@@ -44,12 +69,12 @@
         <div class="call-card">
           <div id="call-peer" class="call-peer"></div>
           <div id="call-state" class="call-state"></div>
+          <ul id="call-members" class="members"></ul>
           <div id="call-timer" class="call-timer hidden">00:00</div>
           <div id="call-quality" class="muted small"></div>
           <div class="call-actions">
-            <button id="btn-accept" class="round accept hidden" title="接听">接听</button>
             <button id="btn-mute" class="round hidden" title="静音">静音</button>
-            <button id="btn-hangup" class="round hangup" title="挂断">挂断</button>
+            <button id="btn-hangup" class="round hangup" title="离开">离开</button>
           </div>
           <button id="btn-audio" class="link hidden">点击开启声音</button>
         </div>

@@ -18,10 +18,8 @@ type Config struct {
 	// CACert 为自签名证书兜底时固定信任的证书文件；为空则使用系统根证书
 	CACert string
 
-	AutoAnswer bool
-	// CallTarget 按键主动呼叫时的目标 Web 用户名，空表示呼叫所有在线用户
+	// CallTarget 短按提醒的 Web 用户名，空表示提醒所有在线用户
 	CallTarget string
-	RingTone   bool
 
 	AudioBackend   string
 	CaptureDevice  string
@@ -91,9 +89,7 @@ func Load(args []string) (*Config, error) {
 	fs.StringVar(&c.DeviceSecret, "device-secret", env("DEVICE_SECRET", ""), "设备密钥 [DEVICE_SECRET]")
 	fs.StringVar(&c.CACert, "ca-cert", env("CA_CERT", ""), "固定信任的服务端证书（自签名时使用）[CA_CERT]")
 
-	fs.BoolVar(&c.AutoAnswer, "auto-answer", envBool("AUTO_ANSWER", false), "来电自动接听 [AUTO_ANSWER]")
-	fs.StringVar(&c.CallTarget, "call-target", env("CALL_TARGET", ""), "按键呼叫的 Web 用户，空为全部在线用户 [CALL_TARGET]")
-	fs.BoolVar(&c.RingTone, "ring-tone", envBool("RING_TONE", true), "来电时喇叭播放铃声 [RING_TONE]")
+	fs.StringVar(&c.CallTarget, "call-target", env("CALL_TARGET", ""), "短按提醒的 Web 用户，空为全部在线用户 [CALL_TARGET]")
 
 	fs.StringVar(&c.AudioBackend, "audio-backend", env("AUDIO_BACKEND", "auto"), "auto|pulseaudio|alsa|null [AUDIO_BACKEND]")
 	fs.StringVar(&c.CaptureDevice, "capture-device", env("CAPTURE_DEVICE", ""), "采集设备名子串，空为默认 [CAPTURE_DEVICE]")

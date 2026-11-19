@@ -9,22 +9,25 @@ https://{$PUBLIC_IP} {
 
 	encode gzip
 
-	handle /api/* {
-		reverse_proxy call-server:8080
-	}
-	handle /ws/* {
-		reverse_proxy call-server:8080
-	}
-	handle /healthz {
-		reverse_proxy call-server:8080
-	}
-	handle /rtc* {
-		reverse_proxy host.docker.internal:7880
-	}
-	handle {
-		root * /srv/web
-		try_files {path} /index.html
-		file_server
+	# 剥掉 /nexcall 前缀后再分发，后端和 LiveKit 仍看到原来的路径
+	handle_path /nexcall/* {
+		handle /api/* {
+			reverse_proxy call-server:8080
+		}
+		handle /ws/* {
+			reverse_proxy call-server:8080
+		}
+		handle /healthz {
+			reverse_proxy call-server:8080
+		}
+		handle /rtc* {
+			reverse_proxy host.docker.internal:7880
+		}
+		handle {
+			root * /srv/web
+			try_files {path} /index.html
+			file_server
+		}
 	}
 }
 

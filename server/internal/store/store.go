@@ -20,7 +20,15 @@ type Store struct {
 type User struct {
 	Username     string
 	PasswordHash string
+	Role         string
 	CreatedAt    time.Time
+}
+
+type Participant struct {
+	Identity string     `json:"identity"`
+	JoinedAt time.Time  `json:"joinedAt"`
+	LeftAt   *time.Time `json:"leftAt,omitempty"`
+	Reason   string     `json:"reason,omitempty"`
 }
 
 type Device struct {
@@ -64,6 +72,14 @@ CREATE TABLE IF NOT EXISTS calls (
 	end_reason  TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_calls_started ON calls(started_at DESC);
+CREATE TABLE IF NOT EXISTS call_participants (
+	call_id   TEXT NOT NULL,
+	identity  TEXT NOT NULL,
+	joined_at INTEGER NOT NULL,
+	left_at   INTEGER,
+	reason    TEXT NOT NULL DEFAULT '',
+	PRIMARY KEY (call_id, identity, joined_at)
+);
 `
 
 func Open(path string) (*Store, error) {
@@ -76,7 +92,42 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
-	return &Store{db: db}, nil
+	st := &Store{db: db}
+	if err := st.migrate(context.Background()); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return st, nil
+}
+
+func (s *Store) migrate(ctx context.Context) error {
+	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(users)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	hasRole := false
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
+			return err
+		}
+		if name == "role" {
+			hasRole = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if !hasRole {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'`); err != nil {
+			return fmt.Errorf("migrate users.role: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -102,8 +153,8 @@ func (s *Store) UpsertUser(ctx context.Context, username, passwordHash string) e
 func (s *Store) GetUser(ctx context.Context, username string) (*User, error) {
 	var u User
 	var created int64
-	err := s.db.QueryRowContext(ctx, `SELECT username, password_hash, created_at FROM users WHERE username = ?`, username).
-		Scan(&u.Username, &u.PasswordHash, &created)
+	err := s.db.QueryRowContext(ctx, `SELECT username, password_hash, role, created_at FROM users WHERE username = ?`, username).
+		Scan(&u.Username, &u.PasswordHash, &u.Role, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -111,7 +162,25 @@ func (s *Store) GetUser(ctx context.Context, username string) (*User, error) {
 		return nil, err
 	}
 	u.CreatedAt = time.UnixMilli(created)
+	if u.Role == "" {
+		u.Role = "user"
+	}
 	return &u, nil
+}
+
+func (s *Store) SetRole(ctx context.Context, username, role string) error {
+	if role != "admin" && role != "user" {
+		return fmt.Errorf("invalid role %q", role)
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE users SET role = ? WHERE username = ?`, role, username)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *Store) DeleteUser(ctx context.Context, username string) error {
@@ -119,17 +188,22 @@ func (s *Store) DeleteUser(ctx context.Context, username string) error {
 	return err
 }
 
-func (s *Store) ListUsers(ctx context.Context) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT username FROM users ORDER BY username`)
+func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT username, password_hash, role, created_at FROM users ORDER BY username`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []string
+	var out []User
 	for rows.Next() {
-		var u string
-		if err := rows.Scan(&u); err != nil {
+		var u User
+		var created int64
+		if err := rows.Scan(&u.Username, &u.PasswordHash, &u.Role, &created); err != nil {
 			return nil, err
+		}
+		u.CreatedAt = time.UnixMilli(created)
+		if u.Role == "" {
+			u.Role = "user"
 		}
 		out = append(out, u)
 	}
@@ -192,18 +266,27 @@ func (s *Store) TouchDevice(ctx context.Context, id string, t time.Time) error {
 	return err
 }
 
-func (s *Store) CallStarted(ctx context.Context, id, caller, callee string, t time.Time) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO calls(id, caller, callee, started_at) VALUES(?, ?, ?, ?)`,
-		id, caller, callee, unix(t))
+func (s *Store) RoomOpened(ctx context.Context, id, caller, callee string, t time.Time) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO calls(id, caller, callee, started_at, answered_at) VALUES(?, ?, ?, ?, ?)`,
+		id, caller, callee, unix(t), unix(t))
 	return err
 }
 
-func (s *Store) CallAnswered(ctx context.Context, id, callee string, t time.Time) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE calls SET answered_at = ?, callee = ? WHERE id = ?`, unix(t), callee, id)
+func (s *Store) ParticipantJoined(ctx context.Context, callID, identity string, t time.Time) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO call_participants(call_id, identity, joined_at) VALUES(?, ?, ?)`,
+		callID, identity, unix(t))
 	return err
 }
 
-func (s *Store) CallEnded(ctx context.Context, id, reason string, t time.Time) error {
+func (s *Store) ParticipantLeft(ctx context.Context, callID, identity, reason string, t time.Time) error {
+	_, err := s.db.ExecContext(ctx, `
+		UPDATE call_participants SET left_at = ?, reason = ?
+		WHERE call_id = ? AND identity = ? AND left_at IS NULL`,
+		unix(t), reason, callID, identity)
+	return err
+}
+
+func (s *Store) RoomClosed(ctx context.Context, id, reason string, t time.Time) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE calls SET ended_at = ?, end_reason = ? WHERE id = ? AND ended_at IS NULL`,
 		unix(t), reason, id)
 	return err
@@ -211,6 +294,9 @@ func (s *Store) CallEnded(ctx context.Context, id, reason string, t time.Time) e
 
 // MarkDanglingCalls 服务重启时把上次未结束的通话标记为结束。
 func (s *Store) MarkDanglingCalls(ctx context.Context, t time.Time) error {
+	if _, err := s.db.ExecContext(ctx, `UPDATE call_participants SET left_at = ?, reason = 'server_restart' WHERE left_at IS NULL`, unix(t)); err != nil {
+		return err
+	}
 	_, err := s.db.ExecContext(ctx, `UPDATE calls SET ended_at = ?, end_reason = 'server_restart' WHERE ended_at IS NULL`, unix(t))
 	return err
 }
@@ -222,8 +308,8 @@ func (s *Store) ListCalls(ctx context.Context, party string, limit int) ([]*Call
 	q := `SELECT id, caller, callee, started_at, answered_at, ended_at, end_reason FROM calls`
 	args := []any{}
 	if party != "" {
-		q += ` WHERE caller = ? OR callee = ? OR callee = 'web:*'`
-		args = append(args, party, party)
+		q += ` WHERE caller = ? OR callee = ? OR id IN (SELECT call_id FROM call_participants WHERE identity = ?)`
+		args = append(args, party, party, party)
 	}
 	q += ` ORDER BY started_at DESC LIMIT ?`
 	args = append(args, limit)
@@ -245,6 +331,45 @@ func (s *Store) ListCalls(ctx context.Context, party string, limit int) ([]*Call
 		c.AnsweredAt = fromUnix(answered)
 		c.EndedAt = fromUnix(ended)
 		out = append(out, &c)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) GetCall(ctx context.Context, id string) (*CallRecord, error) {
+	var c CallRecord
+	var started int64
+	var answered, ended sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `SELECT id, caller, callee, started_at, answered_at, ended_at, end_reason FROM calls WHERE id = ?`, id).
+		Scan(&c.ID, &c.Caller, &c.Callee, &started, &answered, &ended, &c.EndReason)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	c.StartedAt = time.UnixMilli(started)
+	c.AnsweredAt = fromUnix(answered)
+	c.EndedAt = fromUnix(ended)
+	return &c, nil
+}
+
+func (s *Store) ListParticipants(ctx context.Context, callID string) ([]*Participant, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT identity, joined_at, left_at, reason FROM call_participants WHERE call_id = ? ORDER BY joined_at`, callID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Participant
+	for rows.Next() {
+		var p Participant
+		var joined int64
+		var left sql.NullInt64
+		if err := rows.Scan(&p.Identity, &joined, &left, &p.Reason); err != nil {
+			return nil, err
+		}
+		p.JoinedAt = time.UnixMilli(joined)
+		p.LeftAt = fromUnix(left)
+		out = append(out, &p)
 	}
 	return out, rows.Err()
 }

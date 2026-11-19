@@ -13,8 +13,6 @@ import (
 const (
 	KindDevice = "device"
 	KindWeb    = "web"
-	// AllWeb 设备呼叫时不指定用户，则振铃所有在线 Web 用户
-	AllWeb = "web:*"
 )
 
 // Peer 是一条信令连接。同一 Web 用户可以有多个 Peer（多个标签页）。
@@ -22,6 +20,7 @@ type Peer struct {
 	Kind string
 	ID   string
 	Name string
+	Role string
 	send chan Message
 	once sync.Once
 	done chan struct{}
@@ -53,74 +52,61 @@ type TokenIssuer interface {
 	RoomToken(room, identity, name string) (string, error)
 }
 
+// Recorder 把「房间里出现网页用户」到「网页用户全部离开」记成一次通话。
 type Recorder interface {
-	CallStarted(ctx context.Context, id, caller, callee string, t time.Time) error
-	CallAnswered(ctx context.Context, id, callee string, t time.Time) error
-	CallEnded(ctx context.Context, id, reason string, t time.Time) error
+	RoomOpened(ctx context.Context, id, caller, callee string, t time.Time) error
+	ParticipantJoined(ctx context.Context, callID, identity string, t time.Time) error
+	ParticipantLeft(ctx context.Context, callID, identity, reason string, t time.Time) error
+	RoomClosed(ctx context.Context, id, reason string, t time.Time) error
+}
+
+type Remover interface {
+	RemoveParticipant(ctx context.Context, room, identity string) error
 }
 
 type DeviceDirectory interface {
-	// Devices 返回所有已登记设备（不含在线状态）
 	Devices(ctx context.Context) ([]DeviceStatus, error)
 	Touch(ctx context.Context, id string, t time.Time)
 }
 
-type callState int
-
-const (
-	stateRinging callState = iota
-	stateActive
-)
-
-type call struct {
-	id      string
-	room    string
-	caller  *Peer
-	callee  string // 地址；设备呼叫全部 Web 用户时为 AllWeb
-	invited map[*Peer]struct{}
-	answer  *Peer
-	state   callState
-	timer   *time.Timer
-}
-
-func (c *call) involves(p *Peer) bool {
-	if c.caller == p || c.answer == p {
-		return true
-	}
-	_, ok := c.invited[p]
-	return ok
+type room struct {
+	id       string
+	deviceID string
+	target   string
+	members  map[*Peer]time.Time
+	recorded map[*Peer]struct{}
+	recordID string
+	started  time.Time
 }
 
 type Hub struct {
-	tokens      TokenIssuer
-	recorder    Recorder
-	devices     DeviceDirectory
-	livekitURL  string
-	ringTimeout time.Duration
+	tokens     TokenIssuer
+	recorder   Recorder
+	devices    DeviceDirectory
+	remover    Remover
+	livekitURL string
 
-	mu        sync.Mutex
-	devPeers  map[string]*Peer
-	webPeers  map[string]map[*Peer]struct{}
-	calls     map[string]*call
-	peerCalls map[*Peer]string
+	mu       sync.Mutex
+	devPeers map[string]*Peer
+	webPeers map[string]map[*Peer]struct{}
+	rooms    map[string]*room
+	peerRoom map[*Peer]string
 }
 
-func NewHub(tokens TokenIssuer, recorder Recorder, devices DeviceDirectory, livekitURL string, ringTimeout time.Duration) *Hub {
-	if ringTimeout == 0 {
-		ringTimeout = 45 * time.Second
-	}
+func NewHub(tokens TokenIssuer, recorder Recorder, devices DeviceDirectory, livekitURL string, _ time.Duration) *Hub {
 	return &Hub{
-		tokens:      tokens,
-		recorder:    recorder,
-		devices:     devices,
-		livekitURL:  livekitURL,
-		ringTimeout: ringTimeout,
-		devPeers:    map[string]*Peer{},
-		webPeers:    map[string]map[*Peer]struct{}{},
-		calls:       map[string]*call{},
-		peerCalls:   map[*Peer]string{},
+		tokens:     tokens,
+		recorder:   recorder,
+		devices:    devices,
+		livekitURL: livekitURL,
+		devPeers:   map[string]*Peer{},
+		webPeers:   map[string]map[*Peer]struct{}{},
+		rooms:      map[string]*room{},
+		peerRoom:   map[*Peer]string{},
 	}
 }
+
+func (h *Hub) SetRemover(r Remover) { h.remover = r }
 
 func newID(prefix string) string {
 	b := make([]byte, 8)
@@ -128,7 +114,7 @@ func newID(prefix string) string {
 	return prefix + hex.EncodeToString(b)
 }
 
-// Register 登记新连接。设备重复连接时踢掉旧连接。
+// Register 登记新连接。设备重复连接时踢掉旧连接，并进入自己的常驻房间。
 func (h *Hub) Register(p *Peer) {
 	h.mu.Lock()
 	var old *Peer
@@ -155,10 +141,13 @@ func (h *Hub) Register(p *Peer) {
 
 	if p.Kind == KindDevice {
 		h.devices.Touch(context.Background(), p.ID, time.Now())
-		h.broadcastPresence()
+		h.mu.Lock()
+		h.enterDeviceLocked(p)
+		h.mu.Unlock()
 	} else {
 		p.Send(h.presence())
 	}
+	h.broadcastPresence()
 }
 
 func (h *Hub) Unregister(p *Peer) {
@@ -181,23 +170,8 @@ func (h *Hub) Unregister(p *Peer) {
 			}
 		}
 	}
-
-	var toEnd *call
-	if id, ok := h.peerCalls[p]; ok {
-		if c := h.calls[id]; c != nil {
-			if c.caller == p || c.answer == p {
-				toEnd = c
-			} else {
-				delete(c.invited, p)
-				delete(h.peerCalls, p)
-				if len(c.invited) == 0 && c.state == stateRinging {
-					toEnd = c
-				}
-			}
-		}
-	}
-	if toEnd != nil {
-		h.endLocked(toEnd, ReasonDisconnected, p)
+	if h.peerRoom[p] != "" {
+		h.leaveLocked(p, ReasonDisconnected)
 	}
 	h.mu.Unlock()
 
@@ -210,32 +184,107 @@ func (h *Hub) Unregister(p *Peer) {
 	}
 }
 
-// Handle 处理客户端发来的一条消息。
 func (h *Hub) Handle(p *Peer, m Message) {
 	switch m.Type {
 	case TypePing:
 		p.Send(Message{Type: TypePong})
+	case TypeJoin:
+		h.join(p, m.Room)
 	case TypeCall:
-		h.startCall(p, m.To)
-	case TypeRinging:
-		h.ringing(p, m.CallID)
-	case TypeAccept:
-		h.accept(p, m.CallID)
-	case TypeReject:
-		h.reject(p, m.CallID)
-	case TypeHangup:
-		h.hangup(p, m.CallID)
+		h.call(p, m.To)
+	case TypeLeave:
+		h.leave(p)
+	case TypeNotify:
+		h.notify(p, m.To)
+	case TypeKick:
+		h.kick(p, m.Room, m.Peer)
 	default:
 		p.Send(Message{Type: TypeError, Reason: "unknown message type: " + m.Type})
 	}
 }
 
-func (h *Hub) startCall(p *Peer, to string) {
-	if p.Kind == KindDevice && (to == "" || to == "web:") {
-		to = AllWeb
+func (h *Hub) enterDeviceLocked(p *Peer) {
+	r := h.ensureDeviceRoomLocked(p.ID)
+	if h.peerRoom[p] == r.id {
+		h.sendJoinedLocked(p, r)
+		return
 	}
-	kind, target, _ := strings.Cut(to, ":")
-	if (kind != KindDevice && kind != KindWeb) || target == "" {
+	h.addMemberLocked(r, p, "", "")
+	h.sendJoinedLocked(p, r)
+}
+
+func (h *Hub) ensureDeviceRoomLocked(id string) *room {
+	rid := DeviceRoom(id)
+	r := h.rooms[rid]
+	if r == nil {
+		r = &room{id: rid, deviceID: id, members: map[*Peer]time.Time{}, recorded: map[*Peer]struct{}{}}
+		h.rooms[rid] = r
+	}
+	return r
+}
+
+func (h *Hub) join(p *Peer, ref string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	r, errText := h.resolveLocked(ref, true)
+	if r == nil {
+		p.Send(Message{Type: TypeError, Reason: errText})
+		return
+	}
+	if p.Kind == KindDevice && r.deviceID != p.ID {
+		p.Send(Message{Type: TypeError, Room: r.id, Reason: "device can only join its own room"})
+		return
+	}
+	if cur := h.peerRoom[p]; cur != "" && cur != r.id {
+		p.Send(Message{Type: TypeError, Room: cur, Reason: "already in a room"})
+		return
+	}
+	if h.peerRoom[p] == r.id {
+		h.sendJoinedLocked(p, r)
+		return
+	}
+	caller, callee := "", ""
+	if p.Kind == KindWeb {
+		caller = p.Address()
+		if r.deviceID != "" {
+			callee = KindDevice + ":" + r.deviceID
+		} else {
+			callee = r.target
+		}
+	}
+	h.addMemberLocked(r, p, caller, callee)
+	if !h.sendJoinedLocked(p, r) {
+		h.leaveLocked(p, ReasonNormal)
+		return
+	}
+	slog.Info("joined room", "room", r.id, "peer", p.Address())
+	h.broadcastPresenceLocked()
+}
+
+func (h *Hub) resolveLocked(ref string, createDevice bool) (*room, string) {
+	if id, ok := strings.CutPrefix(ref, "device:"); ok && id != "" && !strings.Contains(id, ":") {
+		if !createDevice {
+			return h.rooms[DeviceRoom(id)], "no such room"
+		}
+		return h.ensureDeviceRoomLocked(id), ""
+	}
+	if r := h.rooms[ref]; r != nil {
+		return r, ""
+	}
+	if ref == "" {
+		return nil, "invalid room"
+	}
+	return nil, "no such room"
+}
+
+func (h *Hub) call(p *Peer, to string) {
+	if p.Kind != KindWeb {
+		p.Send(Message{Type: TypeError, Reason: "only web users can call"})
+		return
+	}
+	id, ok := strings.CutPrefix(to, "web:")
+	if !ok || id == "" {
 		p.Send(Message{Type: TypeError, Reason: "invalid target: " + to})
 		return
 	}
@@ -246,189 +295,251 @@ func (h *Hub) startCall(p *Peer, to string) {
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
-
-	if _, busy := h.peerCalls[p]; busy {
-		p.Send(Message{Type: TypeError, Reason: "already in a call"})
+	if h.peerRoom[p] != "" {
+		p.Send(Message{Type: TypeError, Reason: "already in a room"})
+		return
+	}
+	set := h.webPeers[id]
+	if len(set) == 0 {
+		p.Send(Message{Type: TypeError, To: to, Reason: ReasonOffline})
+		return
+	}
+	var invitee *Peer
+	for wp := range set {
+		if h.peerRoom[wp] == "" {
+			invitee = wp
+			break
+		}
+	}
+	if invitee == nil {
+		p.Send(Message{Type: TypeError, To: to, Reason: ReasonBusy})
 		return
 	}
 
-	var invitees []*Peer
-	switch {
-	case kind == KindDevice:
-		if dp := h.devPeers[target]; dp != nil {
-			invitees = []*Peer{dp}
-		}
-	case to == AllWeb:
+	r := &room{
+		id:       newID("r_"),
+		target:   to,
+		members:  map[*Peer]time.Time{},
+		recorded: map[*Peer]struct{}{},
+	}
+	h.rooms[r.id] = r
+	h.addMemberLocked(r, p, p.Address(), to)
+	if !h.sendJoinedLocked(p, r) {
+		h.leaveLocked(p, ReasonNormal)
+		return
+	}
+	invitee.Send(Message{Type: TypeInvite, Room: r.id, From: p.Address()})
+	slog.Info("adhoc room", "room", r.id, "from", p.Address(), "to", to)
+	h.broadcastPresenceLocked()
+}
+
+func (h *Hub) leave(p *Peer) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.peerRoom[p] == "" {
+		p.Send(Message{Type: TypeError, Reason: "not in a room"})
+		return
+	}
+	h.leaveLocked(p, ReasonNormal)
+	h.broadcastPresenceLocked()
+}
+
+func (h *Hub) notify(p *Peer, to string) {
+	if p.Kind != KindDevice {
+		p.Send(Message{Type: TypeError, Reason: "only devices can notify"})
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	msg := Message{Type: TypeNotify, From: p.Address(), Room: DeviceRoom(p.ID)}
+	if to == "" || to == "web:" {
 		for _, set := range h.webPeers {
 			for wp := range set {
-				invitees = append(invitees, wp)
+				wp.Send(msg)
 			}
 		}
-	default:
-		for wp := range h.webPeers[target] {
-			invitees = append(invitees, wp)
-		}
-	}
-
-	callID := newID("c_")
-	if len(invitees) == 0 {
-		p.Send(Message{Type: TypeHangup, CallID: callID, Peer: to, Reason: ReasonOffline})
 		return
 	}
-	free := invitees[:0]
-	for _, ip := range invitees {
-		if _, busy := h.peerCalls[ip]; !busy {
-			free = append(free, ip)
-		}
-	}
-	if len(free) == 0 {
-		p.Send(Message{Type: TypeHangup, CallID: callID, Peer: to, Reason: ReasonBusy})
+	id, ok := strings.CutPrefix(to, "web:")
+	if !ok || id == "" {
+		p.Send(Message{Type: TypeError, Reason: "invalid target: " + to})
 		return
 	}
-
-	c := &call{id: callID, room: callID, caller: p, callee: to, invited: map[*Peer]struct{}{}, state: stateRinging}
-	for _, ip := range free {
-		token, err := h.tokens.RoomToken(c.room, ip.Address(), ip.Name)
-		if err != nil {
-			slog.Error("issue token", "err", err)
-			p.Send(Message{Type: TypeError, Reason: "internal error"})
-			return
-		}
-		c.invited[ip] = struct{}{}
-		h.peerCalls[ip] = callID
-		ip.Send(Message{Type: TypeInvite, CallID: callID, Room: c.room, Token: token, URL: h.livekitURL, From: p.Address()})
+	if len(h.webPeers[id]) == 0 {
+		p.Send(Message{Type: TypeError, To: to, Reason: ReasonOffline})
+		return
 	}
-	h.calls[callID] = c
-	h.peerCalls[p] = callID
-	c.timer = time.AfterFunc(h.ringTimeout, func() { h.timeout(callID) })
-
-	p.Send(Message{Type: TypeOutgoing, CallID: callID, To: to})
-	_ = h.recorder.CallStarted(context.Background(), callID, p.Address(), to, time.Now())
-	slog.Info("call started", "call", callID, "from", p.Address(), "to", to, "invited", len(free))
-	h.broadcastPresenceLocked()
+	for wp := range h.webPeers[id] {
+		wp.Send(msg)
+	}
 }
 
-func (h *Hub) lookup(p *Peer, callID string) *call {
-	c := h.calls[callID]
-	if c == nil || !c.involves(p) {
-		p.Send(Message{Type: TypeError, CallID: callID, Reason: "no such call"})
+func (h *Hub) kick(p *Peer, roomID, identity string) {
+	if p.Role != RoleAdmin {
+		p.Send(Message{Type: TypeError, Reason: "forbidden"})
+		return
+	}
+	if err := h.Kick(roomID, identity, p.Address()); err != nil {
+		p.Send(Message{Type: TypeError, Room: roomID, Reason: err.Error()})
+	}
+}
+
+// Kick 把网页参与者移出房间。by 是操作者地址，写入 kicked 消息。
+func (h *Hub) Kick(roomID, identity, by string) error {
+	if strings.HasPrefix(identity, KindDevice+":") {
+		return errString("cannot kick device")
+	}
+	h.mu.Lock()
+	r := h.rooms[roomID]
+	if r == nil {
+		h.mu.Unlock()
+		return errString("no such room")
+	}
+	var targets []*Peer
+	for m := range r.members {
+		if m.Address() == identity && m.Kind == KindWeb {
+			targets = append(targets, m)
+		}
+	}
+	if len(targets) == 0 {
+		h.mu.Unlock()
+		return errString("not in room")
+	}
+	h.mu.Unlock()
+
+	if h.remover != nil {
+		if err := h.remover.RemoveParticipant(context.Background(), roomID, identity); err != nil {
+			slog.Warn("livekit remove participant", "room", roomID, "identity", identity, "err", err)
+		}
+	}
+
+	h.mu.Lock()
+	r = h.rooms[roomID]
+	if r == nil {
+		h.mu.Unlock()
 		return nil
 	}
-	return c
-}
-
-func (h *Hub) ringing(p *Peer, callID string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	c := h.lookup(p, callID)
-	if c == nil || c.state != stateRinging {
-		return
-	}
-	c.caller.Send(Message{Type: TypeRinging, CallID: callID, Peer: p.Address()})
-}
-
-func (h *Hub) accept(p *Peer, callID string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	c := h.lookup(p, callID)
-	if c == nil {
-		return
-	}
-	if _, invited := c.invited[p]; !invited || c.state != stateRinging {
-		p.Send(Message{Type: TypeError, CallID: callID, Reason: "call not ringing"})
-		return
-	}
-	c.timer.Stop()
-	c.state = stateActive
-	c.answer = p
-	for ip := range c.invited {
-		if ip != p {
-			delete(h.peerCalls, ip)
-			ip.Send(Message{Type: TypeHangup, CallID: callID, Reason: ReasonElsewhere})
+	targets = nil
+	for m := range r.members {
+		if m.Address() == identity && m.Kind == KindWeb {
+			targets = append(targets, m)
 		}
 	}
-	c.invited = map[*Peer]struct{}{p: {}}
-
-	callerToken, err := h.tokens.RoomToken(c.room, c.caller.Address(), c.caller.Name)
-	if err != nil {
-		slog.Error("issue token", "err", err)
-		h.endLocked(c, ReasonCancelled, nil)
-		return
+	for _, m := range targets {
+		m.Send(Message{Type: TypeKicked, Room: roomID, Peer: by, Reason: ReasonKicked})
+		h.leaveLocked(m, ReasonKicked)
 	}
-	calleeToken, err := h.tokens.RoomToken(c.room, p.Address(), p.Name)
-	if err != nil {
-		slog.Error("issue token", "err", err)
-		h.endLocked(c, ReasonCancelled, nil)
-		return
-	}
-	c.caller.Send(Message{Type: TypeAccepted, CallID: callID, Room: c.room, Token: callerToken, URL: h.livekitURL, Peer: p.Address()})
-	p.Send(Message{Type: TypeAccepted, CallID: callID, Room: c.room, Token: calleeToken, URL: h.livekitURL, Peer: c.caller.Address()})
-
-	_ = h.recorder.CallAnswered(context.Background(), callID, p.Address(), time.Now())
-	slog.Info("call accepted", "call", callID, "by", p.Address())
-}
-
-func (h *Hub) reject(p *Peer, callID string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	c := h.lookup(p, callID)
-	if c == nil {
-		return
-	}
-	if c.state != stateRinging || c.caller == p {
-		h.endLocked(c, ReasonNormal, p)
-		return
-	}
-	h.endLocked(c, ReasonRejected, p)
-}
-
-func (h *Hub) hangup(p *Peer, callID string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	c := h.lookup(p, callID)
-	if c == nil {
-		return
-	}
-	reason := ReasonNormal
-	if c.state == stateRinging {
-		if c.caller == p {
-			reason = ReasonCancelled
-		} else {
-			reason = ReasonRejected
-		}
-	}
-	h.endLocked(c, reason, p)
-}
-
-func (h *Hub) timeout(callID string) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if c := h.calls[callID]; c != nil && c.state == stateRinging {
-		h.endLocked(c, ReasonTimeout, nil)
-	}
-}
-
-// endLocked 结束通话并通知除 by 以外的所有相关方。
-func (h *Hub) endLocked(c *call, reason string, by *Peer) {
-	if c.timer != nil {
-		c.timer.Stop()
-	}
-	delete(h.calls, c.id)
-	notify := map[*Peer]struct{}{c.caller: {}}
-	for ip := range c.invited {
-		notify[ip] = struct{}{}
-	}
-	for np := range notify {
-		if h.peerCalls[np] == c.id {
-			delete(h.peerCalls, np)
-		}
-		if np != by {
-			np.Send(Message{Type: TypeHangup, CallID: c.id, Reason: reason})
-		}
-	}
-	_ = h.recorder.CallEnded(context.Background(), c.id, reason, time.Now())
-	slog.Info("call ended", "call", c.id, "reason", reason)
+	slog.Info("kicked", "room", roomID, "identity", identity, "by", by)
 	h.broadcastPresenceLocked()
+	h.mu.Unlock()
+	return nil
+}
+
+type errString string
+
+func (e errString) Error() string { return string(e) }
+
+func (h *Hub) addMemberLocked(r *room, p *Peer, caller, callee string) {
+	now := time.Now()
+	if _, ok := r.members[p]; !ok {
+		r.members[p] = now
+	}
+	h.peerRoom[p] = r.id
+	if p.Kind == KindWeb && r.recordID == "" {
+		r.recordID = newID("c_")
+		r.started = now
+		if caller == "" {
+			caller = p.Address()
+		}
+		if callee == "" {
+			callee = r.target
+		}
+		if err := h.recorder.RoomOpened(context.Background(), r.recordID, caller, callee, now); err != nil {
+			slog.Error("room opened", "err", err)
+		}
+		for m, joined := range r.members {
+			h.recordJoinLocked(r, m, joined)
+		}
+		return
+	}
+	if r.recordID != "" {
+		h.recordJoinLocked(r, p, r.members[p])
+	}
+}
+
+func (h *Hub) recordJoinLocked(r *room, p *Peer, at time.Time) {
+	if _, ok := r.recorded[p]; ok {
+		return
+	}
+	r.recorded[p] = struct{}{}
+	if err := h.recorder.ParticipantJoined(context.Background(), r.recordID, p.Address(), at); err != nil {
+		slog.Error("participant joined", "err", err)
+	}
+}
+
+func (h *Hub) leaveLocked(p *Peer, reason string) {
+	rid := h.peerRoom[p]
+	r := h.rooms[rid]
+	if r == nil {
+		delete(h.peerRoom, p)
+		return
+	}
+	delete(r.members, p)
+	delete(h.peerRoom, p)
+	if r.recordID != "" {
+		if _, ok := r.recorded[p]; ok {
+			delete(r.recorded, p)
+			if err := h.recorder.ParticipantLeft(context.Background(), r.recordID, p.Address(), reason, time.Now()); err != nil {
+				slog.Error("participant left", "err", err)
+			}
+		}
+	}
+	if reason != ReasonKicked {
+		p.Send(Message{Type: TypeLeft, Room: r.id, Reason: reason})
+	}
+	if h.webCount(r) == 0 && r.recordID != "" {
+		now := time.Now()
+		for m := range r.members {
+			if _, ok := r.recorded[m]; ok {
+				delete(r.recorded, m)
+				_ = h.recorder.ParticipantLeft(context.Background(), r.recordID, m.Address(), reason, now)
+			}
+		}
+		if err := h.recorder.RoomClosed(context.Background(), r.recordID, reason, now); err != nil {
+			slog.Error("room closed", "err", err)
+		}
+		r.recordID = ""
+		r.started = time.Time{}
+		r.recorded = map[*Peer]struct{}{}
+	}
+	if r.deviceID == "" && h.webCount(r) == 0 {
+		delete(h.rooms, r.id)
+	}
+	if r.deviceID != "" && len(r.members) == 0 {
+		delete(h.rooms, r.id)
+	}
+	slog.Info("left room", "room", rid, "peer", p.Address(), "reason", reason)
+}
+
+func (h *Hub) webCount(r *room) int {
+	n := 0
+	for m := range r.members {
+		if m.Kind == KindWeb {
+			n++
+		}
+	}
+	return n
+}
+
+func (h *Hub) sendJoinedLocked(p *Peer, r *room) bool {
+	token, err := h.tokens.RoomToken(r.id, p.Address(), p.Name)
+	if err != nil {
+		slog.Error("issue token", "err", err)
+		p.Send(Message{Type: TypeError, Room: r.id, Reason: "internal error"})
+		return false
+	}
+	p.Send(Message{Type: TypeJoined, Room: r.id, Token: token, URL: h.livekitURL})
+	return true
 }
 
 func (h *Hub) presence() Message {
@@ -443,12 +554,45 @@ func (h *Hub) presenceLocked() Message {
 		slog.Error("list devices", "err", err)
 	}
 	for i := range list {
-		if dp := h.devPeers[list[i].ID]; dp != nil {
-			list[i].Online = true
-			_, list[i].Busy = h.peerCalls[dp]
+		dp := h.devPeers[list[i].ID]
+		if dp == nil {
+			continue
+		}
+		list[i].Online = true
+		if r := h.rooms[h.peerRoom[dp]]; r != nil && h.webCount(r) > 0 {
+			list[i].Busy = true
 		}
 	}
-	return Message{Type: TypePresence, Devices: list}
+	var users []UserStatus
+	for id, set := range h.webPeers {
+		u := UserStatus{ID: id, Online: true}
+		for wp := range set {
+			if rid := h.peerRoom[wp]; rid != "" {
+				u.Busy = true
+				u.Room = rid
+				break
+			}
+		}
+		users = append(users, u)
+	}
+	var rooms []RoomStatus
+	for _, r := range h.rooms {
+		if len(r.members) == 0 {
+			continue
+		}
+		rs := RoomStatus{ID: r.id, DeviceID: r.deviceID}
+		if !r.started.IsZero() {
+			t := r.started
+			rs.Started = &t
+		}
+		for m, at := range r.members {
+			rs.Members = append(rs.Members, MemberStatus{
+				Address: m.Address(), Name: m.Name, Kind: m.Kind, JoinedAt: at,
+			})
+		}
+		rooms = append(rooms, rs)
+	}
+	return Message{Type: TypePresence, Devices: list, Users: users, Rooms: rooms}
 }
 
 func (h *Hub) broadcastPresence() {

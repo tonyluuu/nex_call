@@ -21,11 +21,11 @@ const (
 	Offline Pattern = iota
 	// Idle 在线待机：每 3 秒短亮一次
 	Idle
-	// Calling 呼出中：中速闪
+	// Calling 保留的中速闪
 	Calling
-	// Incoming 来电：快闪
+	// Incoming 通话中本地静音：快闪
 	Incoming
-	// Active 通话中：常亮
+	// Active 有人在房间且麦克风打开：常亮
 	Active
 )
 

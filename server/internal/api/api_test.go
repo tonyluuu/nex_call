@@ -31,7 +31,7 @@ func (d dir) Devices(ctx context.Context) ([]signal.DeviceStatus, error) {
 }
 func (d dir) Touch(ctx context.Context, id string, t time.Time) { _ = d.st.TouchDevice(ctx, id, t) }
 
-func setup(t *testing.T) (*httptest.Server, string) {
+func setup(t *testing.T) (*httptest.Server, *store.Store, string) {
 	t.Helper()
 	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
@@ -57,7 +57,7 @@ func setup(t *testing.T) (*httptest.Server, string) {
 	}
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
-	return ts, secret
+	return ts, st, secret
 }
 
 func login(t *testing.T, base, user, pw string) (int, string) {
@@ -93,7 +93,7 @@ func read(t *testing.T, c *websocket.Conn, typ string) signal.Message {
 }
 
 func TestLoginAndCallFlow(t *testing.T) {
-	ts, secret := setup(t)
+	ts, _, secret := setup(t)
 	wsBase := "ws" + strings.TrimPrefix(ts.URL, "http")
 	ctx := context.Background()
 
@@ -141,21 +141,17 @@ func TestLoginAndCallFlow(t *testing.T) {
 	}
 	resp.Body.Close()
 
-	_ = wsjson.Write(ctx, web, signal.Message{Type: signal.TypeCall, To: "device:pi1"})
-	out := read(t, web, signal.TypeOutgoing)
-	inv := read(t, dev, signal.TypeInvite)
-	if inv.Token == "" || inv.CallID != out.CallID {
-		t.Fatalf("invite %+v", inv)
-	}
-	_ = wsjson.Write(ctx, dev, signal.Message{Type: signal.TypeAccept, CallID: inv.CallID})
-	acc := read(t, web, signal.TypeAccepted)
-	if acc.Token == "" || acc.URL != "wss://example" {
-		t.Fatalf("accepted %+v", acc)
-	}
-	read(t, dev, signal.TypeAccepted)
+	read(t, dev, signal.TypeJoined)
 
-	_ = wsjson.Write(ctx, dev, signal.Message{Type: signal.TypeHangup, CallID: inv.CallID})
-	read(t, web, signal.TypeHangup)
+	_ = wsjson.Write(ctx, web, signal.Message{Type: signal.TypeJoin, Room: "device:pi1"})
+	joined := read(t, web, signal.TypeJoined)
+	if joined.Token == "" || joined.URL != "wss://example" || joined.Room != signal.DeviceRoom("pi1") {
+		t.Fatalf("joined %+v", joined)
+	}
+	_ = wsjson.Write(ctx, web, signal.Message{Type: signal.TypeLeave})
+	if m := read(t, web, signal.TypeLeft); m.Reason != signal.ReasonNormal {
+		t.Fatalf("left %+v", m)
+	}
 
 	time.Sleep(50 * time.Millisecond)
 	req, _ = http.NewRequest("GET", ts.URL+"/api/calls", nil)
@@ -172,8 +168,97 @@ func TestLoginAndCallFlow(t *testing.T) {
 	}
 }
 
+func TestAdminKickAndCallVisibility(t *testing.T) {
+	ts, st, secret := setup(t)
+	ctx := context.Background()
+	hash, _ := auth.HashPassword("password123")
+	if err := st.UpsertUser(ctx, "root", hash); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetRole(ctx, "root", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.UpsertUser(ctx, "bob", hash); err != nil {
+		t.Fatal(err)
+	}
+
+	_, aliceToken := login(t, ts.URL, "alice", "password123")
+	_, rootToken := login(t, ts.URL, "root", "password123")
+	wsBase := "ws" + strings.TrimPrefix(ts.URL, "http")
+
+	dev, _, err := websocket.Dial(ctx, wsBase+"/ws/device", &websocket.DialOptions{
+		HTTPHeader: http.Header{"Authorization": {"Bearer pi1:" + secret}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dev.CloseNow()
+	read(t, dev, signal.TypeRegistered)
+	read(t, dev, signal.TypeJoined)
+
+	alice, _, err := websocket.Dial(ctx, wsBase+"/ws/web?token="+aliceToken, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer alice.CloseNow()
+	read(t, alice, signal.TypeRegistered)
+
+	body, _ := json.Marshal(map[string]string{"room": signal.DeviceRoom("pi1"), "identity": "web:alice"})
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/api/admin/kick", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+aliceToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("user kick status %d", resp.StatusCode)
+	}
+
+	_ = wsjson.Write(ctx, alice, signal.Message{Type: signal.TypeJoin, Room: "device:pi1"})
+	read(t, alice, signal.TypeJoined)
+
+	req, _ = http.NewRequest(http.MethodPost, ts.URL+"/api/admin/kick", bytes.NewReader(body))
+	req.Header.Set("Authorization", "Bearer "+rootToken)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("admin kick status %d", resp.StatusCode)
+	}
+	if m := read(t, alice, signal.TypeKicked); m.Reason != signal.ReasonKicked {
+		t.Fatalf("kicked %+v", m)
+	}
+
+	req, _ = http.NewRequest("GET", ts.URL+"/api/calls", nil)
+	req.Header.Set("Authorization", "Bearer "+aliceToken)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var aliceCalls []store.CallRecord
+	_ = json.NewDecoder(resp.Body).Decode(&aliceCalls)
+	resp.Body.Close()
+
+	_, bobToken := login(t, ts.URL, "bob", "password123")
+	req, _ = http.NewRequest("GET", ts.URL+"/api/calls", nil)
+	req.Header.Set("Authorization", "Bearer "+bobToken)
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var bobCalls []store.CallRecord
+	_ = json.NewDecoder(resp.Body).Decode(&bobCalls)
+	resp.Body.Close()
+	if len(aliceCalls) != 1 || len(bobCalls) != 0 {
+		t.Fatalf("alice %d bob %d", len(aliceCalls), len(bobCalls))
+	}
+}
+
 func TestUnauthorized(t *testing.T) {
-	ts, _ := setup(t)
+	ts, _, _ := setup(t)
 	resp, err := http.Get(ts.URL + "/api/devices")
 	if err != nil {
 		t.Fatal(err)

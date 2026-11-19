@@ -1,4 +1,4 @@
-import type { DeviceStatus } from './api'
+import { apiPath, type DeviceStatus, type RoomStatus, type UserStatus } from './api'
 
 export interface Message {
   type: string
@@ -12,6 +12,8 @@ export interface Message {
   reason?: string
   self?: string
   devices?: DeviceStatus[]
+  users?: UserStatus[]
+  rooms?: RoomStatus[]
 }
 
 type Listener = (m: Message) => void
@@ -57,7 +59,7 @@ export class SignalClient {
 
   private connect() {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const ws = new WebSocket(`${proto}//${location.host}/ws/web?token=${encodeURIComponent(this.token)}`)
+    const ws = new WebSocket(`${proto}//${location.host}${apiPath('/ws/web')}?token=${encodeURIComponent(this.token)}`)
     this.ws = ws
     let opened = false
 

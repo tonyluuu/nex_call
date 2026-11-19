@@ -35,6 +35,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/me", s.requireUser(s.me))
 	mux.HandleFunc("GET /api/devices", s.requireUser(s.listDevices))
 	mux.HandleFunc("GET /api/calls", s.requireUser(s.listCalls))
+	mux.HandleFunc("GET /api/calls/{id}", s.requireUser(s.getCall))
+	mux.HandleFunc("POST /api/admin/kick", s.requireAdmin(s.kick))
 	mux.HandleFunc("GET /ws/web", s.wsWeb)
 	mux.HandleFunc("GET /ws/device", s.wsDevice)
 	if s.WebDir != "" {
@@ -79,6 +81,17 @@ func (s *Server) requireUser(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+func (s *Server) requireAdmin(next http.HandlerFunc) http.HandlerFunc {
+	return s.requireUser(func(w http.ResponseWriter, r *http.Request) {
+		u, err := s.Store.GetUser(r.Context(), userFrom(r))
+		if err != nil || u.Role != signal.RoleAdmin {
+			writeErr(w, http.StatusForbidden, "forbidden")
+			return
+		}
+		next(w, r)
+	})
+}
+
 func clientIP(r *http.Request) string {
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
 		ip, _, _ := strings.Cut(xff, ",")
@@ -118,12 +131,18 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{
 		"token":      s.Sessions.Issue(u.Username),
 		"username":   u.Username,
+		"role":       u.Role,
 		"livekitUrl": s.LiveKitURL,
 	})
 }
 
 func (s *Server) me(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]string{"username": userFrom(r), "livekitUrl": s.LiveKitURL})
+	u, err := s.Store.GetUser(r.Context(), userFrom(r))
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"username": u.Username, "role": u.Role, "livekitUrl": s.LiveKitURL})
 }
 
 func (s *Server) listDevices(w http.ResponseWriter, r *http.Request) {
@@ -132,7 +151,11 @@ func (s *Server) listDevices(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) listCalls(w http.ResponseWriter, r *http.Request) {
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-	calls, err := s.Store.ListCalls(r.Context(), "", limit)
+	party := "web:" + userFrom(r)
+	if u, err := s.Store.GetUser(r.Context(), userFrom(r)); err == nil && u.Role == signal.RoleAdmin {
+		party = ""
+	}
+	calls, err := s.Store.ListCalls(r.Context(), party, limit)
 	if err != nil {
 		slog.Error("list calls", "err", err)
 		writeErr(w, http.StatusInternalServerError, "internal error")
@@ -144,6 +167,65 @@ func (s *Server) listCalls(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, calls)
 }
 
+func (s *Server) getCall(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	call, err := s.Store.GetCall(r.Context(), id)
+	if err != nil {
+		writeErr(w, http.StatusNotFound, "not found")
+		return
+	}
+	u, err := s.Store.GetUser(r.Context(), userFrom(r))
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	parts, err := s.Store.ListParticipants(r.Context(), id)
+	if err != nil {
+		slog.Error("list participants", "err", err)
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if u.Role != signal.RoleAdmin && !callInvolves(call, parts, "web:"+u.Username) {
+		writeErr(w, http.StatusForbidden, "forbidden")
+		return
+	}
+	if parts == nil {
+		parts = []*store.Participant{}
+	}
+	writeJSON(w, http.StatusOK, struct {
+		*store.CallRecord
+		Participants []*store.Participant `json:"participants"`
+	}{call, parts})
+}
+
+func callInvolves(c *store.CallRecord, parts []*store.Participant, addr string) bool {
+	if c.Caller == addr || c.Callee == addr {
+		return true
+	}
+	for _, p := range parts {
+		if p.Identity == addr {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) kick(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Room     string `json:"room"`
+		Identity string `json:"identity"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil || req.Room == "" || req.Identity == "" {
+		writeErr(w, http.StatusBadRequest, "bad request")
+		return
+	}
+	if err := s.Hub.Kick(req.Room, req.Identity, "web:"+userFrom(r)); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
+}
+
 // wsWeb 浏览器的 WebSocket 不能自定义请求头，会话令牌放在查询参数里。
 func (s *Server) wsWeb(w http.ResponseWriter, r *http.Request) {
 	user, err := s.Sessions.Verify(r.URL.Query().Get("token"))
@@ -151,7 +233,14 @@ func (s *Server) wsWeb(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
-	s.Hub.Serve(w, r, signal.NewPeer(signal.KindWeb, user, user), s.OriginPatterns)
+	u, err := s.Store.GetUser(r.Context(), user)
+	if err != nil {
+		writeErr(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	peer := signal.NewPeer(signal.KindWeb, u.Username, u.Username)
+	peer.Role = u.Role
+	s.Hub.Serve(w, r, peer, s.OriginPatterns)
 }
 
 // wsDevice 设备用请求头 Authorization: Bearer <deviceId>:<secret> 鉴权。
@@ -178,7 +267,7 @@ func (s *Server) wsDevice(w http.ResponseWriter, r *http.Request) {
 
 // loginLimiter 每个 IP 连续失败 10 次后锁定 5 分钟。
 type loginLimiter struct {
-	mu   sync.Mutex
+	mu    sync.Mutex
 	fails map[string]*failure
 }
 

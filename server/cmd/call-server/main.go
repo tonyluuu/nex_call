@@ -52,6 +52,7 @@ func loadConfig() config {
 		dbPath: env("DB_PATH", "nexcall.db"),
 		livekit: auth.LiveKit{
 			URL:       env("LIVEKIT_URL", "ws://localhost:7880"),
+			APIURL:    env("LIVEKIT_API_URL", "http://localhost:7880"),
 			APIKey:    env("LIVEKIT_API_KEY", ""),
 			APISecret: env("LIVEKIT_API_SECRET", ""),
 		},
@@ -67,7 +68,8 @@ const usage = `call-server - 实时通话业务服务
 
 用法:
   call-server [serve]                       启动服务
-  call-server user add <用户名> [密码]       添加/重置 Web 用户（不给密码则交互输入）
+  call-server user add <用户名> [密码] [--admin]  添加/重置 Web 用户（不给密码则交互输入）
+  call-server user role <用户名> admin|user
   call-server user del <用户名>
   call-server user list
   call-server device add <设备ID> [名称]     登记设备并生成密钥（重复执行会重置密钥）
@@ -75,7 +77,7 @@ const usage = `call-server - 实时通话业务服务
   call-server device list
   call-server token <房间> <身份>            签发调试用 LiveKit Token（直连模式）
 
-环境变量: LISTEN_ADDR DB_PATH LIVEKIT_URL LIVEKIT_API_KEY LIVEKIT_API_SECRET
+环境变量: LISTEN_ADDR DB_PATH LIVEKIT_URL LIVEKIT_API_URL LIVEKIT_API_KEY LIVEKIT_API_SECRET
           SESSION_SECRET ALLOWED_ORIGINS WEB_DIR RING_TIMEOUT LOG_LEVEL
 `
 
@@ -171,6 +173,7 @@ func serve(cfg config) error {
 	}
 
 	hub := sig.NewHub(&cfg.livekit, st, directory{st}, cfg.livekit.URL, cfg.ringTimeout)
+	hub.SetRemover(&cfg.livekit)
 	srv := &api.Server{
 		Store:          st,
 		Hub:            hub,
@@ -217,12 +220,21 @@ func userCmd(st *store.Store, args []string) error {
 	}
 	switch args[0] {
 	case "add":
-		if len(args) < 2 {
-			return errors.New("user add <username> [password]")
+		admin := false
+		var rest []string
+		for _, a := range args[1:] {
+			if a == "--admin" {
+				admin = true
+				continue
+			}
+			rest = append(rest, a)
+		}
+		if len(rest) < 1 {
+			return errors.New("user add <username> [password] [--admin]")
 		}
 		pw := ""
-		if len(args) > 2 {
-			pw = args[2]
+		if len(rest) > 1 {
+			pw = rest[1]
 		} else {
 			var err error
 			if pw, err = readPassword(); err != nil {
@@ -236,10 +248,20 @@ func userCmd(st *store.Store, args []string) error {
 		if err != nil {
 			return err
 		}
-		if err := st.UpsertUser(ctx, args[1], hash); err != nil {
+		if err := st.UpsertUser(ctx, rest[0], hash); err != nil {
 			return err
 		}
-		fmt.Println("用户已保存:", args[1])
+		if admin {
+			if err := st.SetRole(ctx, rest[0], "admin"); err != nil {
+				return err
+			}
+		}
+		fmt.Println("用户已保存:", rest[0])
+	case "role":
+		if len(args) < 3 {
+			return errors.New("user role <username> admin|user")
+		}
+		return st.SetRole(ctx, args[1], args[2])
 	case "del":
 		if len(args) < 2 {
 			return errors.New("user del <username>")
@@ -251,7 +273,7 @@ func userCmd(st *store.Store, args []string) error {
 			return err
 		}
 		for _, u := range users {
-			fmt.Println(u)
+			fmt.Printf("%s\t%s\n", u.Username, u.Role)
 		}
 	default:
 		return errors.New("user add|del|list")

@@ -39,9 +39,19 @@ nex_call/
 7. 添加网页用户和设备：
    ```bash
    docker compose exec call-server call-server user add alice          # 交互输入密码
+   docker compose exec call-server call-server user add admin --admin  # 管理员：可看全部通话、移出网页参与者
    docker compose exec call-server call-server device add pi1 客厅      # 输出 DEVICE_ID / DEVICE_SECRET，只显示一次
    ```
-8. 浏览器访问 `https://<公网IP>`，登录后能看到设备列表。
+   已有用户改角色：`call-server user role alice admin`。
+8. 浏览器访问 `https://<公网IP>/nexcall/`。登录后能看到设备、在线用户和进行中的通话。根路径 `/` 不会跳转。
+
+网页、接口、信令和 LiveKit 都挂在 `/nexcall` 下。香橙派的 `SERVER_URL` 也要带这个前缀。
+
+### 通话方式
+
+- 每台 Pi 连上后一直待在自己的房间里，没有网页用户时麦克风静音，有人进入就开麦。网页点「进入」直接通话，Pi 不用接听。
+- 网页呼叫另一个网页时，对方自动进入同一个临时房间；其他人可以在「进行中的通话」里加入。最后一名网页用户离开后，这次通话结束。
+- 一个人同时只在一个房间里。管理员在「管理」页可以查看全部通话，并把网页参与者移出房间（不能移出 Pi）。
 
 ## 二、香橙派 Zero2
 
@@ -56,26 +66,26 @@ nex_call/
 4. 安装为 systemd 服务并填写配置：
    ```bash
    ./install.sh ./device-agent
-   sudo nano /etc/nexcall/device.env     # SERVER_URL=https://<公网IP>、DEVICE_ID、DEVICE_SECRET
+   sudo nano /etc/nexcall/device.env     # SERVER_URL=https://<公网IP>/nexcall、DEVICE_ID、DEVICE_SECRET
    sudo systemctl restart device-agent && journalctl -u device-agent -f
    ```
 
 按键与指示灯（`BUTTON_LINE` / `LED_LINE` 用 `gpioinfo` 查线号）：
 
-| 状态 | 短按 | 长按 | LED |
-| --- | --- | --- | --- |
-| 待机 | 呼叫 `CALL_TARGET`（为空则所有在线用户） | - | 每 3 秒闪一下（离线时慢闪） |
-| 来电 | 接听 | 拒接 | 快闪 |
-| 呼出 / 通话中 | 挂断 | 挂断 | 中速闪 / 常亮 |
+| 状态 | 短按 | LED |
+| --- | --- | --- |
+| 离线 | 无作用 | 慢闪 |
+| 在房间待命（无人） | 提醒 `CALL_TARGET`（为空则所有在线网页） | 每 3 秒闪一下 |
+| 有人在房间 | 切换静音 | 常亮；静音时快闪 |
 
-没接按键时可以用信号模拟：`sudo systemctl kill -s USR1 device-agent`（短按）、`-s USR2`（长按）。
+没接按键时可以用信号模拟短按：`sudo systemctl kill -s USR1 device-agent`。
 
 调试时可以跳过 call-server，直接用 Token 进房：
 ```bash
 # 服务器上签一个 Token
 docker compose exec call-server call-server token test-room device:pi1
 # 香橙派上直连，-test-tone 用 440Hz 测试音代替麦克风
-device-agent -livekit-url wss://<公网IP> -token <TOKEN> [-test-tone]
+device-agent -livekit-url wss://<公网IP>/nexcall -token <TOKEN> [-test-tone]
 ```
 
 ## 三、本地开发
@@ -95,7 +105,7 @@ go run ./cmd/call-server user add alice password123
 go run ./cmd/call-server device add pi1 测试设备
 go run ./cmd/call-server serve
 
-# 网页：npm run dev（通过 Vite 代理访问 8080），或 npm run build 后直接打开 http://localhost:8080
+# 网页：npm run dev 后打开 http://localhost:5173/nexcall/（Vite 把 /nexcall/api 和 /nexcall/ws 代理到 8080）
 cd web && npm install && npm run dev
 ```
 
@@ -121,7 +131,8 @@ device-agent 每 10 秒打印一次 `call stats`：收发包数、丢包、FEC �
 
 ## 五、常见问题
 
-- 网页提示"不是 HTTPS"：浏览器只在 HTTPS 或 localhost 下开放麦克风，必须通过 `https://<公网IP>` 访问。
+- 网页提示"不是 HTTPS"：浏览器只在 HTTPS 或 localhost 下开放麦克风，必须通过 `https://<公网IP>/nexcall/` 访问。
+- 从旧版升级：重新 `npm run build`，`docker compose up -d --build`，把香橙派 `SERVER_URL` 改成 `https://<公网IP>/nexcall` 后重启 device-agent。需要管理员时执行 `call-server user role <用户名> admin`。旧的一对一振铃呼叫不再使用。
 - 能登录但通话无声：检查安全组是否放通 UDP 7882 / TCP 7881，以及 LiveKit 日志里的 `nodeIP` 是否为公网 IP。
 - 设备一直重连并提示 `unauthorized`：`DEVICE_SECRET` 不对，重新执行 `call-server device add` 生成新密钥。
 - 自签名证书兜底时：把服务器的 `deploy/certs/fullchain.pem` 拷到香橙派，在 `device.env` 里设置 `CA_CERT`。

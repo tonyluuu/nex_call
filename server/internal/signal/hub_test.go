@@ -14,21 +14,38 @@ func (fakeTokens) RoomToken(room, identity, name string) (string, error) {
 }
 
 type fakeRecorder struct {
-	mu    sync.Mutex
-	ended map[string]string
+	mu     sync.Mutex
+	opened int
+	closed map[string]string
+	joined []string
+	left   []string
 }
 
-func (r *fakeRecorder) CallStarted(context.Context, string, string, string, time.Time) error {
+func (r *fakeRecorder) RoomOpened(context.Context, string, string, string, time.Time) error {
+	r.mu.Lock()
+	r.opened++
+	r.mu.Unlock()
 	return nil
 }
-func (r *fakeRecorder) CallAnswered(context.Context, string, string, time.Time) error { return nil }
-func (r *fakeRecorder) CallEnded(_ context.Context, id, reason string, _ time.Time) error {
+func (r *fakeRecorder) ParticipantJoined(_ context.Context, _, identity string, _ time.Time) error {
+	r.mu.Lock()
+	r.joined = append(r.joined, identity)
+	r.mu.Unlock()
+	return nil
+}
+func (r *fakeRecorder) ParticipantLeft(_ context.Context, _, identity, reason string, _ time.Time) error {
+	r.mu.Lock()
+	r.left = append(r.left, identity+":"+reason)
+	r.mu.Unlock()
+	return nil
+}
+func (r *fakeRecorder) RoomClosed(_ context.Context, id, reason string, _ time.Time) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.ended == nil {
-		r.ended = map[string]string{}
+	if r.closed == nil {
+		r.closed = map[string]string{}
 	}
-	r.ended[id] = reason
+	r.closed[id] = reason
 	return nil
 }
 
@@ -43,12 +60,24 @@ func (d fakeDir) Devices(context.Context) ([]DeviceStatus, error) {
 }
 func (fakeDir) Touch(context.Context, string, time.Time) {}
 
-func newTestHub(ring time.Duration) (*Hub, *fakeRecorder) {
-	rec := &fakeRecorder{}
-	return NewHub(fakeTokens{}, rec, fakeDir{ids: []string{"pi1", "pi2"}}, "wss://test", ring), rec
+type fakeRemove struct {
+	mu   sync.Mutex
+	got  []string
+	fail error
 }
 
-// expect 读取下一条非 presence 消息。
+func (f *fakeRemove) RemoveParticipant(_ context.Context, room, identity string) error {
+	f.mu.Lock()
+	f.got = append(f.got, room+" "+identity)
+	f.mu.Unlock()
+	return f.fail
+}
+
+func newTestHub() (*Hub, *fakeRecorder) {
+	rec := &fakeRecorder{}
+	return NewHub(fakeTokens{}, rec, fakeDir{ids: []string{"pi1", "pi2"}}, "wss://test", time.Minute), rec
+}
+
 func expect(t *testing.T, p *Peer, typ string) Message {
 	t.Helper()
 	timeout := time.After(time.Second)
@@ -88,222 +117,174 @@ func register(t *testing.T, h *Hub, kind, id string) *Peer {
 	p := NewPeer(kind, id, id)
 	h.Register(p)
 	expect(t, p, TypeRegistered)
+	if kind == KindDevice {
+		j := expect(t, p, TypeJoined)
+		if j.Room != DeviceRoom(id) || j.Token == "" {
+			t.Fatalf("device join %+v", j)
+		}
+	}
 	return p
 }
 
-func TestWebCallsDeviceAcceptAndHangup(t *testing.T) {
-	h, rec := newTestHub(time.Minute)
+func TestDeviceRoomStaysAndWebsComeAndGo(t *testing.T) {
+	h, rec := newTestHub()
 	dev := register(t, h, KindDevice, "pi1")
-	web := register(t, h, KindWeb, "alice")
+	alice := register(t, h, KindWeb, "alice")
+	bob := register(t, h, KindWeb, "bob")
 
-	h.Handle(web, Message{Type: TypeCall, To: "device:pi1"})
-	out := expect(t, web, TypeOutgoing)
-	inv := expect(t, dev, TypeInvite)
-	if inv.CallID != out.CallID || inv.Token != "tok:"+inv.Room+":device:pi1" || inv.From != "web:alice" || inv.URL != "wss://test" {
-		t.Fatalf("bad invite %+v", inv)
+	h.Handle(alice, Message{Type: TypeJoin, Room: "device:pi1"})
+	aj := expect(t, alice, TypeJoined)
+	if aj.Room != DeviceRoom("pi1") || aj.Token != "tok:"+DeviceRoom("pi1")+":web:alice" {
+		t.Fatalf("alice joined %+v", aj)
 	}
+	expectNone(t, dev)
 
-	h.Handle(dev, Message{Type: TypeRinging, CallID: inv.CallID})
-	expect(t, web, TypeRinging)
+	h.Handle(bob, Message{Type: TypeJoin, Room: DeviceRoom("pi1")})
+	expect(t, bob, TypeJoined)
 
-	h.Handle(dev, Message{Type: TypeAccept, CallID: inv.CallID})
-	acc := expect(t, web, TypeAccepted)
-	if acc.Token != "tok:"+inv.Room+":web:alice" || acc.Peer != "device:pi1" {
-		t.Fatalf("bad accepted %+v", acc)
-	}
-	expect(t, dev, TypeAccepted)
-
-	if s := h.Snapshot(); !s[0].Online || !s[0].Busy || s[1].Online {
+	if s := h.Snapshot(); !s[0].Online || !s[0].Busy {
 		t.Fatalf("snapshot %+v", s)
 	}
 
-	h.Handle(web, Message{Type: TypeHangup, CallID: inv.CallID})
-	if m := expect(t, dev, TypeHangup); m.Reason != ReasonNormal {
-		t.Fatalf("reason %q", m.Reason)
-	}
-	expectNone(t, web)
-	if rec.ended[inv.CallID] != ReasonNormal {
-		t.Fatalf("recorded %q", rec.ended[inv.CallID])
-	}
-	if len(h.calls) != 0 || len(h.peerCalls) != 0 {
-		t.Fatalf("leaked state: calls=%d peerCalls=%d", len(h.calls), len(h.peerCalls))
-	}
-}
+	h.Handle(alice, Message{Type: TypeLeave})
+	expect(t, alice, TypeLeft)
+	expectNone(t, bob)
 
-func TestDeviceCallsAllWebAnsweredElsewhere(t *testing.T) {
-	h, _ := newTestHub(time.Minute)
-	dev := register(t, h, KindDevice, "pi1")
-	tab1 := register(t, h, KindWeb, "alice")
-	tab2 := register(t, h, KindWeb, "alice")
-	bob := register(t, h, KindWeb, "bob")
+	h.Handle(bob, Message{Type: TypeLeave})
+	expect(t, bob, TypeLeft)
 
-	h.Handle(dev, Message{Type: TypeCall})
-	out := expect(t, dev, TypeOutgoing)
-	if out.To != AllWeb {
-		t.Fatalf("to = %q", out.To)
-	}
-	for _, p := range []*Peer{tab1, tab2, bob} {
-		expect(t, p, TypeInvite)
-	}
-
-	h.Handle(tab2, Message{Type: TypeAccept, CallID: out.CallID})
-	if m := expect(t, dev, TypeAccepted); m.Peer != "web:alice" {
-		t.Fatalf("peer %q", m.Peer)
-	}
-	expect(t, tab2, TypeAccepted)
-	for _, p := range []*Peer{tab1, bob} {
-		if m := expect(t, p, TypeHangup); m.Reason != ReasonElsewhere {
-			t.Fatalf("reason %q", m.Reason)
-		}
-	}
-
-	h.Handle(dev, Message{Type: TypeHangup, CallID: out.CallID})
-	expect(t, tab2, TypeHangup)
-	expectNone(t, tab1)
-}
-
-func TestRingTimeout(t *testing.T) {
-	h, rec := newTestHub(50 * time.Millisecond)
-	dev := register(t, h, KindDevice, "pi1")
-	web := register(t, h, KindWeb, "alice")
-
-	h.Handle(web, Message{Type: TypeCall, To: "device:pi1"})
-	out := expect(t, web, TypeOutgoing)
-	expect(t, dev, TypeInvite)
-	if m := expect(t, web, TypeHangup); m.Reason != ReasonTimeout {
-		t.Fatalf("reason %q", m.Reason)
-	}
-	if m := expect(t, dev, TypeHangup); m.Reason != ReasonTimeout {
-		t.Fatalf("reason %q", m.Reason)
-	}
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
-	if rec.ended[out.CallID] != ReasonTimeout {
-		t.Fatalf("recorded %q", rec.ended[out.CallID])
+	if rec.opened != 1 || len(rec.closed) != 1 {
+		t.Fatalf("records opened=%d closed=%v", rec.opened, rec.closed)
 	}
 }
 
-func TestRejectAndCancel(t *testing.T) {
-	h, _ := newTestHub(time.Minute)
-	dev := register(t, h, KindDevice, "pi1")
-	web := register(t, h, KindWeb, "alice")
-
-	h.Handle(web, Message{Type: TypeCall, To: "device:pi1"})
-	expect(t, web, TypeOutgoing)
-	inv := expect(t, dev, TypeInvite)
-	h.Handle(dev, Message{Type: TypeReject, CallID: inv.CallID})
-	if m := expect(t, web, TypeHangup); m.Reason != ReasonRejected {
-		t.Fatalf("reason %q", m.Reason)
-	}
-
-	h.Handle(web, Message{Type: TypeCall, To: "device:pi1"})
-	out := expect(t, web, TypeOutgoing)
-	expect(t, dev, TypeInvite)
-	h.Handle(web, Message{Type: TypeHangup, CallID: out.CallID})
-	if m := expect(t, dev, TypeHangup); m.Reason != ReasonCancelled {
-		t.Fatalf("reason %q", m.Reason)
-	}
-}
-
-func TestOfflineAndBusy(t *testing.T) {
-	h, _ := newTestHub(time.Minute)
+func TestWebCallAutoInviteAndThirdJoin(t *testing.T) {
+	h, rec := newTestHub()
 	alice := register(t, h, KindWeb, "alice")
 	bob := register(t, h, KindWeb, "bob")
+	cara := register(t, h, KindWeb, "cara")
 
-	h.Handle(alice, Message{Type: TypeCall, To: "device:pi2"})
-	if m := expect(t, alice, TypeHangup); m.Reason != ReasonOffline {
-		t.Fatalf("reason %q", m.Reason)
+	h.Handle(alice, Message{Type: TypeCall, To: "web:bob"})
+	joined := expect(t, alice, TypeJoined)
+	inv := expect(t, bob, TypeInvite)
+	if inv.Room != joined.Room || inv.From != "web:alice" {
+		t.Fatalf("invite %+v joined %+v", inv, joined)
+	}
+	expectNone(t, cara)
+
+	h.Handle(bob, Message{Type: TypeJoin, Room: inv.Room})
+	if bj := expect(t, bob, TypeJoined); bj.Room != inv.Room {
+		t.Fatalf("bob %+v", bj)
 	}
 
-	dev := register(t, h, KindDevice, "pi1")
-	h.Handle(alice, Message{Type: TypeCall, To: "device:pi1"})
-	expect(t, alice, TypeOutgoing)
-	expect(t, dev, TypeInvite)
+	h.Handle(cara, Message{Type: TypeJoin, Room: inv.Room})
+	expect(t, cara, TypeJoined)
 
-	h.Handle(bob, Message{Type: TypeCall, To: "device:pi1"})
-	if m := expect(t, bob, TypeHangup); m.Reason != ReasonBusy {
-		t.Fatalf("reason %q", m.Reason)
+	h.Handle(bob, Message{Type: TypeLeave})
+	expect(t, bob, TypeLeft)
+	h.Handle(cara, Message{Type: TypeLeave})
+	expect(t, cara, TypeLeft)
+	h.Handle(alice, Message{Type: TypeLeave})
+	expect(t, alice, TypeLeft)
+
+	h.Handle(cara, Message{Type: TypeJoin, Room: inv.Room})
+	if m := expect(t, cara, TypeError); m.Reason != "no such room" {
+		t.Fatalf("rejoin %+v", m)
 	}
 
-	h.Handle(alice, Message{Type: TypeCall, To: "device:pi1"})
-	expect(t, alice, TypeError)
+	rec.mu.Lock()
+	if rec.opened != 1 || len(rec.closed) != 1 {
+		t.Fatalf("records %+v", rec.closed)
+	}
+	rec.mu.Unlock()
 }
 
-func TestDisconnectDuringCall(t *testing.T) {
-	h, _ := newTestHub(time.Minute)
-	dev := register(t, h, KindDevice, "pi1")
-	web := register(t, h, KindWeb, "alice")
+func TestCallBusyAndOffline(t *testing.T) {
+	h, _ := newTestHub()
+	alice := register(t, h, KindWeb, "alice")
+	bob := register(t, h, KindWeb, "bob")
+	h.Handle(bob, Message{Type: TypeJoin, Room: "device:pi1"})
+	expect(t, bob, TypeJoined)
 
-	h.Handle(web, Message{Type: TypeCall, To: "device:pi1"})
-	expect(t, web, TypeOutgoing)
-	inv := expect(t, dev, TypeInvite)
-	h.Handle(dev, Message{Type: TypeAccept, CallID: inv.CallID})
-	expect(t, web, TypeAccepted)
-	expect(t, dev, TypeAccepted)
-
-	h.Unregister(dev)
-	if m := expect(t, web, TypeHangup); m.Reason != ReasonDisconnected {
-		t.Fatalf("reason %q", m.Reason)
+	h.Handle(alice, Message{Type: TypeCall, To: "web:bob"})
+	if m := expect(t, alice, TypeError); m.Reason != ReasonBusy {
+		t.Fatalf("got %+v", m)
 	}
-	if len(h.peerCalls) != 0 {
-		t.Fatalf("leaked peerCalls %d", len(h.peerCalls))
+	h.Handle(alice, Message{Type: TypeCall, To: "web:nobody"})
+	if m := expect(t, alice, TypeError); m.Reason != ReasonOffline {
+		t.Fatalf("got %+v", m)
 	}
 }
 
-func TestInvitedTabClosingKeepsCallUntilLast(t *testing.T) {
-	h, _ := newTestHub(time.Minute)
+func TestKickRemovesWebNotDevice(t *testing.T) {
+	h, _ := newTestHub()
+	rem := &fakeRemove{}
+	h.SetRemover(rem)
 	dev := register(t, h, KindDevice, "pi1")
-	tab1 := register(t, h, KindWeb, "alice")
-	tab2 := register(t, h, KindWeb, "alice")
+	alice := register(t, h, KindWeb, "alice")
+	admin := register(t, h, KindWeb, "root")
+	admin.Role = RoleAdmin
 
-	h.Handle(dev, Message{Type: TypeCall, To: "web:alice"})
-	expect(t, dev, TypeOutgoing)
-	expect(t, tab1, TypeInvite)
-	expect(t, tab2, TypeInvite)
+	h.Handle(alice, Message{Type: TypeJoin, Room: "device:pi1"})
+	room := expect(t, alice, TypeJoined).Room
 
-	h.Unregister(tab1)
+	h.Handle(alice, Message{Type: TypeKick, Room: room, Peer: "web:alice"})
+	if m := expect(t, alice, TypeError); m.Reason != "forbidden" {
+		t.Fatalf("non-admin %+v", m)
+	}
+
+	h.Handle(admin, Message{Type: TypeKick, Room: room, Peer: "device:pi1"})
+	if m := expect(t, admin, TypeError); m.Reason != "cannot kick device" {
+		t.Fatalf("kick device %+v", m)
+	}
 	expectNone(t, dev)
-	h.Unregister(tab2)
-	if m := expect(t, dev, TypeHangup); m.Reason != ReasonDisconnected {
-		t.Fatalf("reason %q", m.Reason)
+
+	if err := h.Kick(room, "web:alice", "web:root"); err != nil {
+		t.Fatal(err)
+	}
+	k := expect(t, alice, TypeKicked)
+	if k.Room != room || k.Reason != ReasonKicked {
+		t.Fatalf("kicked %+v", k)
+	}
+	if len(rem.got) != 1 || rem.got[0] != room+" web:alice" {
+		t.Fatalf("remover %+v", rem.got)
 	}
 }
 
-func TestDeviceReconnectReplacesOld(t *testing.T) {
-	h, _ := newTestHub(time.Minute)
-	old := register(t, h, KindDevice, "pi1")
-	web := register(t, h, KindWeb, "alice")
-	h.Handle(web, Message{Type: TypeCall, To: "device:pi1"})
-	expect(t, web, TypeOutgoing)
-	expect(t, old, TypeInvite)
-
-	register(t, h, KindDevice, "pi1")
-	select {
-	case <-old.Done():
-	default:
-		t.Fatal("old connection not closed")
+func TestDisconnectClearsMembership(t *testing.T) {
+	h, rec := newTestHub()
+	alice := register(t, h, KindWeb, "alice")
+	h.Handle(alice, Message{Type: TypeJoin, Room: "device:pi1"})
+	expect(t, alice, TypeJoined)
+	h.Unregister(alice)
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.closed) != 1 {
+		t.Fatalf("closed %+v", rec.closed)
 	}
-	if m := expect(t, web, TypeHangup); m.Reason != ReasonDisconnected {
-		t.Fatalf("reason %q", m.Reason)
-	}
-	if !h.Snapshot()[0].Online {
-		t.Fatal("device should still be online via new connection")
+	for _, reason := range rec.closed {
+		if reason != ReasonDisconnected {
+			t.Fatalf("reason %s", reason)
+		}
 	}
 }
 
-func TestStrangerCannotTouchCall(t *testing.T) {
-	h, _ := newTestHub(time.Minute)
+func TestNotifyTargets(t *testing.T) {
+	h, _ := newTestHub()
 	dev := register(t, h, KindDevice, "pi1")
 	alice := register(t, h, KindWeb, "alice")
 	bob := register(t, h, KindWeb, "bob")
 
-	h.Handle(alice, Message{Type: TypeCall, To: "device:pi1"})
-	out := expect(t, alice, TypeOutgoing)
-	expect(t, dev, TypeInvite)
+	h.Handle(dev, Message{Type: TypeNotify, To: "web:alice"})
+	n := expect(t, alice, TypeNotify)
+	if n.From != "device:pi1" || n.Room != DeviceRoom("pi1") {
+		t.Fatalf("notify %+v", n)
+	}
+	expectNone(t, bob)
 
-	h.Handle(bob, Message{Type: TypeAccept, CallID: out.CallID})
-	expect(t, bob, TypeError)
-	h.Handle(bob, Message{Type: TypeHangup, CallID: out.CallID})
-	expect(t, bob, TypeError)
-	expectNone(t, alice)
+	h.Handle(dev, Message{Type: TypeNotify})
+	expect(t, alice, TypeNotify)
+	expect(t, bob, TypeNotify)
 }

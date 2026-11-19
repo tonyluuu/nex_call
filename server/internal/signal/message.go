@@ -1,41 +1,39 @@
-// Package signal 实现设备与 Web 之间的呼叫信令。
+// Package signal 实现设备与 Web 之间的房间信令。
 package signal
 
 import "time"
 
-// 消息类型。客户端发往服务端：call / ringing / accept / reject / hangup / ping；
-// 服务端发往客户端：registered / presence / outgoing / invite / ringing / accepted / hangup / error / pong。
+// 客户端发往服务端：join / call / leave / notify / kick / ping。
+// 服务端发往客户端：registered / presence / joined / invite / notify / left / kicked / error / pong。
 const (
+	TypeJoin       = "join"
 	TypeCall       = "call"
-	TypeRinging    = "ringing"
-	TypeAccept     = "accept"
-	TypeReject     = "reject"
-	TypeHangup     = "hangup"
+	TypeLeave      = "leave"
+	TypeNotify     = "notify"
+	TypeKick       = "kick"
 	TypePing       = "ping"
 	TypePong       = "pong"
 	TypeRegistered = "registered"
 	TypePresence   = "presence"
-	TypeOutgoing   = "outgoing"
+	TypeJoined     = "joined"
 	TypeInvite     = "invite"
-	TypeAccepted   = "accepted"
+	TypeLeft       = "left"
+	TypeKicked     = "kicked"
 	TypeError      = "error"
 )
 
-// 挂断原因
 const (
 	ReasonNormal       = "normal"
-	ReasonRejected     = "rejected"
 	ReasonBusy         = "busy"
-	ReasonTimeout      = "timeout"
 	ReasonOffline      = "offline"
 	ReasonDisconnected = "disconnected"
-	ReasonElsewhere    = "answered_elsewhere"
-	ReasonCancelled    = "cancelled"
+	ReasonKicked       = "kicked"
+	RoleAdmin          = "admin"
+	RoleUser           = "user"
 )
 
 type Message struct {
 	Type    string         `json:"type"`
-	CallID  string         `json:"callId,omitempty"`
 	Room    string         `json:"room,omitempty"`
 	Token   string         `json:"token,omitempty"`
 	URL     string         `json:"url,omitempty"`
@@ -45,6 +43,8 @@ type Message struct {
 	Reason  string         `json:"reason,omitempty"`
 	Self    string         `json:"self,omitempty"`
 	Devices []DeviceStatus `json:"devices,omitempty"`
+	Users   []UserStatus   `json:"users,omitempty"`
+	Rooms   []RoomStatus   `json:"rooms,omitempty"`
 }
 
 type DeviceStatus struct {
@@ -54,3 +54,27 @@ type DeviceStatus struct {
 	Busy     bool       `json:"busy"`
 	LastSeen *time.Time `json:"lastSeen,omitempty"`
 }
+
+type UserStatus struct {
+	ID     string `json:"id"`
+	Online bool   `json:"online"`
+	Busy   bool   `json:"busy"`
+	Room   string `json:"room,omitempty"`
+}
+
+type MemberStatus struct {
+	Address  string    `json:"address"`
+	Name     string    `json:"name"`
+	Kind     string    `json:"kind"`
+	JoinedAt time.Time `json:"joinedAt"`
+}
+
+type RoomStatus struct {
+	ID       string         `json:"id"`
+	DeviceID string         `json:"deviceId,omitempty"`
+	Members  []MemberStatus `json:"members"`
+	Started  *time.Time     `json:"started,omitempty"`
+}
+
+// DeviceRoom 是设备常驻的 LiveKit 房间名。
+func DeviceRoom(id string) string { return "device-" + id }

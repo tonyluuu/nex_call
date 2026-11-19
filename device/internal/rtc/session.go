@@ -36,14 +36,14 @@ type Session struct {
 	track  *webrtc.TrackLocalStaticSample
 	frames chan []int16
 
-	mu     sync.Mutex
-	player *playout.Player
+	mu      sync.Mutex
+	players map[string]*playout.Player
+	muted   atomic.Bool
 
-	peerLeft     chan struct{}
-	peerLeftOnce sync.Once
-	done         chan struct{}
-	doneOnce     sync.Once
-	closeOnce    sync.Once
+	occ       chan int
+	done      chan struct{}
+	doneOnce  sync.Once
+	closeOnce sync.Once
 
 	txFrames atomic.Uint64
 	txDrops  atomic.Uint64
@@ -69,24 +69,26 @@ func Join(url, token string, opts Options) (*Session, error) {
 	}
 
 	s := &Session{
-		opts:     opts,
-		enc:      enc,
-		track:    track,
-		frames:   make(chan []int16, 8),
-		peerLeft: make(chan struct{}),
-		done:     make(chan struct{}),
+		opts:    opts,
+		enc:     enc,
+		track:   track,
+		frames:  make(chan []int16, 8),
+		players: map[string]*playout.Player{},
+		occ:     make(chan int, 4),
+		done:    make(chan struct{}),
 	}
+	s.muted.Store(true)
 
 	cb := lksdk.NewRoomCallback()
 	cb.OnTrackSubscribed = s.onTrackSubscribed
+	cb.OnTrackUnsubscribed = s.onTrackUnsubscribed
 	cb.OnParticipantDisconnected = func(rp *lksdk.RemoteParticipant) {
 		slog.Info("participant left", "identity", rp.Identity())
-		if s.room != nil && len(s.room.GetRemoteParticipants()) == 0 {
-			s.peerLeftOnce.Do(func() { close(s.peerLeft) })
-		}
+		s.publishCount()
 	}
 	cb.OnParticipantConnected = func(rp *lksdk.RemoteParticipant) {
 		slog.Info("participant joined", "identity", rp.Identity())
+		s.publishCount()
 	}
 	cb.OnReconnecting = func() { slog.Warn("livekit reconnecting") }
 	cb.OnReconnected = func() { slog.Info("livekit reconnected") }
@@ -127,11 +129,34 @@ func Join(url, token string, opts Options) (*Session, error) {
 		go s.toneLoop()
 	}
 	go s.statsLoop()
+	s.publishCount()
 	return s, nil
 }
 
-// PeerLeft 在房间里其他人都离开后关闭。
-func (s *Session) PeerLeft() <-chan struct{} { return s.peerLeft }
+// Occupancy 在远端参与者人数变化时送出最新人数。
+func (s *Session) Occupancy() <-chan int { return s.occ }
+
+// SetMuted 为 true 时不往房间送麦克风数据。
+func (s *Session) SetMuted(muted bool) { s.muted.Store(muted) }
+
+func (s *Session) publishCount() {
+	n := 0
+	if s.room != nil {
+		n = len(s.room.GetRemoteParticipants())
+	}
+	select {
+	case s.occ <- n:
+	default:
+		select {
+		case <-s.occ:
+		default:
+		}
+		select {
+		case s.occ <- n:
+		default:
+		}
+	}
+}
 
 // Done 在与 LiveKit 的连接断开后关闭。
 func (s *Session) Done() <-chan struct{} { return s.done }
@@ -185,6 +210,9 @@ func (s *Session) encodeLoop() {
 			slog.Warn("opus encode failed", "err", err)
 			continue
 		}
+		if s.muted.Load() {
+			continue
+		}
 		if err := s.track.WriteSample(media.Sample{Data: pkt, Duration: codec.FrameMs * time.Millisecond}); err != nil {
 			continue
 		}
@@ -205,14 +233,16 @@ func (s *Session) onTrackSubscribed(track *webrtc.TrackRemote, pub *lksdk.Remote
 	target := max(1, s.opts.JitterTargetMs/frameMs)
 	maxFrames := max(target*2, s.opts.JitterMaxMs/frameMs)
 	p := playout.New(dec, codec.FrameSize, target, maxFrames)
+	key := rp.Identity() + "/" + track.ID()
 
 	s.mu.Lock()
-	s.player = p
+	s.players[key] = p
 	s.mu.Unlock()
 	s.rxTracks.Add(1)
 	slog.Info("subscribed remote audio", "identity", rp.Identity(), "codec", track.Codec().MimeType)
 
 	go func() {
+		defer s.removePlayer(key)
 		for {
 			pkt, _, err := track.ReadRTP()
 			if err != nil {
@@ -228,15 +258,33 @@ func (s *Session) onTrackSubscribed(track *webrtc.TrackRemote, pub *lksdk.Remote
 	}()
 }
 
+func (s *Session) onTrackUnsubscribed(track *webrtc.TrackRemote, _ *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
+	s.removePlayer(rp.Identity() + "/" + track.ID())
+}
+
+func (s *Session) removePlayer(key string) {
+	s.mu.Lock()
+	delete(s.players, key)
+	s.mu.Unlock()
+}
+
 func (s *Session) pull(out []int16) {
 	s.mu.Lock()
-	p := s.player
+	players := make([]*playout.Player, 0, len(s.players))
+	for _, p := range s.players {
+		players = append(players, p)
+	}
 	s.mu.Unlock()
-	if p == nil {
+	if len(players) == 0 {
 		clear(out)
 		return
 	}
-	p.Pull(out)
+	bufs := make([][]int16, len(players))
+	for i, p := range players {
+		bufs[i] = make([]int16, len(out))
+		p.Pull(bufs[i])
+	}
+	playout.Mix(out, bufs)
 }
 
 func (s *Session) statsLoop() {
@@ -255,11 +303,33 @@ func (s *Session) statsLoop() {
 func (s *Session) logStats() {
 	attrs := []any{"tx_frames", s.txFrames.Load(), "tx_drops", s.txDrops.Load()}
 	s.mu.Lock()
-	p := s.player
+	players := make([]*playout.Player, 0, len(s.players))
+	for _, p := range s.players {
+		players = append(players, p)
+	}
 	s.mu.Unlock()
-	if p != nil {
-		st := p.Stats()
+	var st playout.Stats
+	for _, p := range players {
+		one := p.Stats()
+		st.Pushed += one.Pushed
+		st.Played += one.Played
+		st.Lost += one.Lost
+		st.FEC += one.FEC
+		st.PLC += one.PLC
+		st.Late += one.Late
+		st.Dropped += one.Dropped
+		st.Underruns += one.Underruns
+		st.Stretched += one.Stretched
+		if one.Depth > st.Depth {
+			st.Depth = one.Depth
+		}
+		if one.Target > st.Target {
+			st.Target = one.Target
+		}
+	}
+	if len(players) > 0 {
 		attrs = append(attrs,
+			"tracks", len(players),
 			"rx_packets", st.Pushed, "played", st.Played, "lost", st.Lost,
 			"fec", st.FEC, "plc", st.PLC, "late", st.Late, "dropped", st.Dropped,
 			"underruns", st.Underruns, "stretched", st.Stretched,

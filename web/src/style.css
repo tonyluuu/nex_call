@@ -286,6 +286,68 @@ h2 {
   color: #111;
 }
 
+.tabs {
+  display: flex;
+  gap: 8px;
+}
+
+.tabs .on {
+  color: var(--text);
+  font-weight: 700;
+}
+
+.notify {
+  position: fixed;
+  top: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: var(--panel);
+  border: 1px solid var(--amber);
+  color: var(--text);
+  padding: 10px 14px;
+  border-radius: 10px;
+  max-width: 92vw;
+}
+
+.row-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.room-card {
+  align-items: flex-start;
+}
+
+.members {
+  list-style: none;
+  padding: 0;
+  margin: 16px 0 0;
+}
+
+.members li {
+  padding: 4px 0;
+  color: var(--muted);
+}
+
+.members li.speaking {
+  color: var(--green);
+  font-weight: 700;
+}
+
+.clickable {
+  cursor: pointer;
+}
+
+.detail td {
+  color: var(--muted);
+}
+
 @media (max-width: 560px) {
   .calls th:nth-child(1),
   .calls td:nth-child(1) {
