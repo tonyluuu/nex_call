@@ -47,15 +47,22 @@ install_opus_if_old() {
   fi
   local ver=1.3.1 url ok=0
   echo "==> 系统 libopus 过旧，编译安装 ${ver}"
+  echo "    只在香橙派上编译 device-agent 时需要。使用 Actions 打好的二进制可以跳过。"
   for url in \
+    "https://gh-proxy.com/https://github.com/xiph/opus/archive/refs/tags/v${ver}.tar.gz" \
+    "https://ghfast.top/https://github.com/xiph/opus/archive/refs/tags/v${ver}.tar.gz" \
     "https://github.com/xiph/opus/archive/refs/tags/v${ver}.tar.gz"
   do
-    if curl -fL --retry 2 --connect-timeout 15 --max-time 120 -o /tmp/opus.tar.gz "$url"; then
+    echo "    下载 ${url}"
+    if curl -fL --retry 1 --connect-timeout 8 --max-time 40 -o /tmp/opus.tar.gz "$url"; then
       ok=1
       break
     fi
   done
-  [[ "$ok" == 1 ]] || { echo "下载 libopus ${ver} 失败"; exit 1; }
+  if [[ "$ok" != 1 ]]; then
+    echo "下载 libopus ${ver} 失败，继续后面的步骤。使用已打好的 device-agent 时不受影响。"
+    return 0
+  fi
   rm -rf /tmp/opus-src
   mkdir -p /tmp/opus-src
   tar -C /tmp/opus-src --strip-components=1 -xzf /tmp/opus.tar.gz
@@ -184,6 +191,36 @@ setup_pulse() {
     echo "当前 sink："
     pactl list short sinks || true
     exit 1
+  fi
+  # 派上常有板载声卡和 HDMI。回声消除不指定主设备时会绑到板载口，USB 喇叭没有声音。
+  local usb_sink usb_src
+  usb_sink=$(pactl list short sinks | awk '/usb/ {print $2; exit}')
+  usb_src=$(pactl list short sources | awk '/usb/ && !/monitor/ {print $2; exit}')
+  if [[ -n "$usb_sink" && -n "$usb_src" ]]; then
+    echo "==> 将回声消除绑到 USB 声卡：$usb_sink"
+    pactl unload-module module-echo-cancel >/dev/null 2>&1 || true
+    pactl load-module module-echo-cancel aec_method=webrtc use_master_format=1 \
+      sink_master="$usb_sink" source_master="$usb_src" \
+      sink_name=echo-cancel-sink source_name=echo-cancel-source
+    python3 - "$usb_sink" "$usb_src" << 'PY'
+import pathlib, sys
+sink, src = sys.argv[1], sys.argv[2]
+path = pathlib.Path.home() / ".config/pulse/default.pa"
+text = path.read_text()
+needle = "load-module module-echo-cancel"
+line = (
+    "load-module module-echo-cancel use_master_format=1 aec_method=webrtc "
+    "source_name=echo-cancel-source sink_name=echo-cancel-sink "
+    f"sink_master={sink} source_master={src}"
+)
+out = []
+for raw in text.splitlines():
+    if raw.startswith(needle):
+        out.append(line)
+    else:
+        out.append(raw)
+path.write_text("\n".join(out) + "\n")
+PY
   fi
   pactl set-default-source echo-cancel-source
   pactl set-default-sink echo-cancel-sink
