@@ -1,7 +1,6 @@
-# 构建 linux/arm64 的 device-agent（香橙派 / Debian bookworm，glibc 2.36）。
+# 构建 linux/arm64 的 device-agent（仅 Debian bookworm，glibc 2.36）。
 #   docker buildx build --platform linux/arm64 -o type=local,dest=./dist .
-# 产物 dist/device-agent 拷贝到香橙派即可运行，运行时依赖 libopus0。
-# Ubuntu 18.04 请改用 Dockerfile.bionic，本文件的产物在 glibc 2.27 上无法启动。
+# 产物不能在 Ubuntu 18.04 上运行。Actions 与 18.04 香橙派请用 Dockerfile.bionic。
 FROM golang:1.26-bookworm AS build
 RUN apt-get update && apt-get install -y --no-install-recommends libopus-dev pkg-config && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
