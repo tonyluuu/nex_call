@@ -111,6 +111,17 @@ docker compose exec call-server call-server token test-room device:pi1
 device-agent -livekit-url wss://<公网IP>/nexcall -token <TOKEN> [-test-tone]
 ```
 
+### 网页音乐播放器（可选）
+
+`music/` 是一个独立的 Flask 小服务：在局域网网页里拖拽上传、删除 MP3，在香橙派喇叭上播放、暂停、拖动进度、切换上一曲 / 下一曲（播完自动下一曲）和调节音量，并显示封面、标签和存储空间占用。声音走默认的 `echo-cancel-sink`，通话时不会把音乐回传给网页。
+```bash
+cd music && ./install.sh     # 安装 mpg123，复制到 /opt/nexcall-music，注册 nexcall-music 服务
+```
+浏览器打开 `http://<香橙派IP>:8090`。曲目存放在 `/var/lib/nexcall-music`。
+
+- device-agent 把通话状态写到 `/run/nexcall/call-state`（`CALL_STATE_FILE`），有网页用户进房时播放器自动暂停，挂断后不会自动继续。需要较新的 device-agent。
+- 没有登录保护，只在局域网使用，不要把 8090 端口映射到公网。
+
 ## 三、本地开发
 
 需要 Go 1.26+、Node 22+、Docker。系统 Go 较旧时在 `server/`、`device/` 目录下执行命令会自动切换工具链（仓库根目录的 `go.work` 需要 Go 1.26 才能直接用）。

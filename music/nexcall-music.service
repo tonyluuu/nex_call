@@ -1,0 +1,24 @@
+[Unit]
+Description=NexCall music player
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 和 device-agent 一样，必须以运行 PulseAudio 的用户身份运行。
+# install.sh 会把 orangepi / 1000 替换成实际用户和 UID。
+User=orangepi
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=PULSE_SERVER=unix:/run/user/1000/pulse/native
+Environment=MUSIC_DIR=/var/lib/nexcall-music
+Environment=MUSIC_PORT=8090
+Environment=CALL_STATE_FILE=/run/nexcall/call-state
+Environment=PYTHONIOENCODING=utf-8
+Environment=LANG=C.UTF-8
+ExecStartPre=/bin/sh -c 'sock="$${XDG_RUNTIME_DIR}/pulse/native"; i=0; while [ ! -S "$$sock" ] && [ "$$i" -lt 30 ]; do i=$$((i+1)); sleep 1; done; if [ ! -S "$$sock" ]; then echo "等待音频套接字超时: $$sock" >&2; exit 1; fi'
+ExecStart=/usr/bin/python3 /opt/nexcall-music/app.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

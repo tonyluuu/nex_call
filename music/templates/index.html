@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>香橙派音乐</title>
+<style>
+  :root { color-scheme: light dark; --accent: #f08a24; --muted: #888; --line: rgba(128,128,128,.25); --soft: rgba(128,128,128,.12); --danger: #d33; }
+  * { box-sizing: border-box; }
+  html { background: Canvas; color: CanvasText; }
+  body { margin: 0; font: 15px/1.5 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; padding-bottom: 150px; }
+  header { padding: 16px 20px 8px; max-width: 760px; margin: 0 auto; }
+  h1 { margin: 0; font-size: 20px; }
+  .muted { color: var(--muted); font-size: 13px; }
+  main { padding: 0 20px; max-width: 760px; margin: 0 auto; }
+
+  .cover { flex: none; border-radius: 8px; background: var(--soft); display: flex; align-items: center; justify-content: center; overflow: hidden; color: var(--muted); }
+  .cover img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+  .detail { display: flex; gap: 18px; padding: 16px; margin: 12px 0; border: 1px solid var(--line); border-radius: 12px; }
+  .detail .cover { width: 150px; height: 150px; font-size: 48px; }
+  .detail .meta { min-width: 0; flex: 1; display: flex; flex-direction: column; gap: 4px; }
+  .detail h2 { margin: 0; font-size: 19px; word-break: break-all; }
+  .detail .artist { font-size: 15px; }
+  .detail dl { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin: 6px 0 0; font-size: 13px; }
+  .detail dt { color: var(--muted); }
+  .detail dd { margin: 0; word-break: break-all; }
+  @media (max-width: 520px) {
+    .detail { flex-direction: column; align-items: center; text-align: center; }
+    .detail dl { text-align: left; }
+  }
+
+  .drop { display: block; border: 2px dashed var(--line); border-radius: 12px; padding: 20px; margin: 12px 0 8px; text-align: center; cursor: pointer; transition: border-color .15s, background .15s; }
+  .drop:hover, body.dragging .drop { border-color: var(--accent); background: rgba(240,138,36,.08); }
+  .drop strong { color: var(--accent); }
+  .drop input { display: none; }
+  body.dragging::after { content: "松开即可上传"; position: fixed; inset: 0; display: flex; align-items: center; justify-content: center; font-size: 22px; color: #fff; background: rgba(240,138,36,.55); pointer-events: none; z-index: 10; }
+  progress { width: 100%; margin-top: 10px; display: none; }
+
+  .storage { font-size: 13px; margin: 4px 0 8px; }
+  .storage .bar { position: relative; height: 8px; border-radius: 4px; background: var(--soft); overflow: hidden; margin: 6px 0 4px; }
+  .storage .bar span { position: absolute; top: 0; bottom: 0; left: 0; }
+  .storage .used { background: rgba(128,128,128,.45); }
+  .storage .music { background: var(--accent); }
+  .storage .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; }
+  .storage .dot { display: inline-block; width: 8px; height: 8px; border-radius: 2px; margin-right: 4px; vertical-align: middle; }
+  .storage code { font-size: 12px; word-break: break-all; }
+
+  ul { list-style: none; margin: 0; padding: 0; }
+  li { display: flex; align-items: center; gap: 12px; padding: 8px 6px; border-bottom: 1px solid var(--line); cursor: pointer; border-radius: 6px; }
+  li:hover { background: var(--soft); }
+  li.selected { background: var(--soft); }
+  li .cover { width: 42px; height: 42px; font-size: 18px; }
+  li .info { flex: 1; min-width: 0; }
+  li .title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  li.current .title { color: var(--accent); font-weight: 600; }
+  li .sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  button { border: 1px solid var(--line); background: transparent; color: inherit; border-radius: 8px; padding: 6px 14px; font: inherit; cursor: pointer; flex: none; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.danger { color: var(--danger); }
+  button:disabled { opacity: .4; cursor: default; }
+
+  footer { position: fixed; left: 0; right: 0; bottom: 0; padding: 8px 20px 10px; border-top: 1px solid var(--line); background: Canvas; }
+  .seek { display: flex; align-items: center; gap: 10px; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted); }
+  .seek input { flex: 1; accent-color: var(--accent); }
+  .seek span { width: 3.2em; }
+  .seek span:last-child { text-align: right; }
+  .bar-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
+  .bar-row .cover { width: 48px; height: 48px; font-size: 20px; }
+  .bar-row .now { flex: 1; min-width: 120px; }
+  .bar-row .title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .controls { display: flex; gap: 6px; }
+  .controls button { padding: 6px 10px; }
+  .controls .mode { min-width: 5.5em; }
+  .volume { display: flex; align-items: center; gap: 6px; }
+  .volume input { width: 110px; accent-color: var(--accent); }
+  .volume span { width: 3em; text-align: right; font-variant-numeric: tabular-nums; }
+  .error { color: var(--danger); font-size: 13px; min-height: 1.5em; }
+</style>
+</head>
+<body>
+<header>
+  <h1>香橙派音乐</h1>
+  <div class="muted">声音从香橙派的喇叭播放。NexCall 通话开始时会自动暂停。</div>
+</header>
+<main>
+  <section class="detail" id="detail" hidden>
+    <div class="cover" id="detail-cover"></div>
+    <div class="meta">
+      <h2 id="detail-title"></h2>
+      <div class="artist" id="detail-artist"></div>
+      <dl id="detail-fields"></dl>
+    </div>
+  </section>
+
+  <label class="drop" id="drop">
+    <input type="file" id="file" accept=".mp3,audio/mpeg" multiple>
+    <div>把 MP3 拖到这里，或 <strong>点击选择文件</strong></div>
+    <div class="muted">可一次选多首，单个文件不超过 {{ max_mb }} MB</div>
+    <progress id="progress" max="100" value="0"></progress>
+  </label>
+
+  <section class="storage" id="storage" hidden>
+    <div class="muted">保存位置：<code id="storage-dir"></code></div>
+    <div class="bar"><span class="used" id="bar-used"></span><span class="music" id="bar-music"></span></div>
+    <div class="legend muted">
+      <span><i class="dot" style="background: var(--accent)"></i>音乐 <b id="st-music"></b></span>
+      <span><i class="dot" style="background: rgba(128,128,128,.45)"></i>磁盘已用 <b id="st-used"></b> / <b id="st-total"></b></span>
+      <span>剩余 <b id="st-free"></b></span>
+    </div>
+  </section>
+
+  <div class="error" id="error"></div>
+  <ul id="tracks"></ul>
+  <div class="muted" id="empty" hidden>还没有音乐，先上传一首。</div>
+</main>
+<footer>
+  <div class="seek">
+    <span id="time-cur">0:00</span>
+    <input type="range" id="seek" min="0" max="0" step="0.1" value="0" aria-label="播放进度" disabled>
+    <span id="time-total">0:00</span>
+  </div>
+  <div class="bar-row">
+    <div class="cover" id="now-cover"></div>
+    <div class="now">
+      <div class="title" id="now-title">未在播放</div>
+      <div class="muted" id="now-status"></div>
+    </div>
+    <div class="controls">
+      <button id="btn-prev" title="上一曲" aria-label="上一曲">⏮</button>
+      <button id="btn-toggle" class="primary" title="播放" aria-label="播放">▶</button>
+      <button id="btn-next" title="下一曲" aria-label="下一曲">⏭</button>
+      <button id="btn-stop" title="停止" aria-label="停止">⏹</button>
+      <button id="btn-mode" class="mode"></button>
+    </div>
+    <div class="volume">
+      <span aria-hidden="true">🔊</span>
+      <input type="range" id="volume" min="0" max="100" step="1" value="100" aria-label="音量">
+      <span id="volume-text">100%</span>
+    </div>
+  </div>
+</footer>
+<script>
+const $ = (id) => document.getElementById(id)
+const MAX_BYTES = {{ max_mb }} * 1024 * 1024
+let state = { tracks: [], track: '', status: 'stopped', callPaused: false, call: 'idle', volume: 100, position: 0, duration: 0, storage: null }
+let lastJSON = ''
+let lastListKey = ''
+let selected = ''
+let volumeBusyUntil = 0
+let seeking = false
+let positionBase = 0, positionAt = 0
+
+function showError(msg) { $('error').textContent = msg || '' }
+
+async function api(path, body) {
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body || {}),
+  })
+  const data = await res.json().catch(() => ({}))
+  if (!res.ok) throw new Error(data.error || ('请求失败 ' + res.status))
+  return data
+}
+
+function fmtDuration(sec) {
+  sec = Math.max(0, Math.floor(sec || 0))
+  const m = Math.floor(sec / 60), s = sec % 60
+  return m + ':' + String(s).padStart(2, '0')
+}
+
+function fmtSize(bytes) {
+  if (bytes >= 1024 ** 3) return (bytes / 1024 ** 3).toFixed(1) + ' GB'
+  if (bytes >= 1024 * 1024) return (bytes / 1024 / 1024).toFixed(1) + ' MB'
+  return Math.max(1, Math.round(bytes / 1024)) + ' KB'
+}
+
+function setCover(el, info) {
+  const key = info && info.cover ? info.name + '@' + info.version : ''
+  if (el.dataset.key === key && el.firstChild) return
+  el.dataset.key = key
+  el.innerHTML = ''
+  if (key) {
+    const img = document.createElement('img')
+    img.alt = ''
+    img.loading = 'lazy'
+    img.src = '/api/cover?name=' + encodeURIComponent(info.name) + '&v=' + info.version
+    img.onerror = () => { el.textContent = '♪' }
+    el.append(img)
+  } else {
+    el.textContent = '♪'
+  }
+}
+
+function findTrack(name) { return state.tracks.find((t) => t.name === name) }
+
+function trackPath(name) {
+  const dir = state.storage ? state.storage.dir : ''
+  return dir ? dir.replace(/\/$/, '') + '/' + name : name
+}
+
+function renderDetail() {
+  const info = findTrack(selected) || findTrack(state.track)
+  $('detail').hidden = !info
+  if (!info) return
+  setCover($('detail-cover'), info)
+  $('detail-title').textContent = info.title
+  $('detail-artist').textContent = info.artist || '未知歌手'
+  const channels = { 1: '单声道', 2: '立体声' }[info.channels] || (info.channels ? info.channels + ' 声道' : '')
+  const rows = [
+    ['专辑', info.album],
+    ['年份', info.year],
+    ['流派', info.genre],
+    ['时长', info.duration ? fmtDuration(info.duration) : ''],
+    ['音质', [info.bitrate && info.bitrate + ' kbps', info.sampleRate && (info.sampleRate / 1000) + ' kHz', channels].filter(Boolean).join(' · ')],
+    ['大小', fmtSize(info.size)],
+    ['位置', trackPath(info.name)],
+  ]
+  const dl = $('detail-fields')
+  dl.innerHTML = ''
+  for (const [k, v] of rows) {
+    if (!v) continue
+    const dt = document.createElement('dt'); dt.textContent = k
+    const dd = document.createElement('dd'); dd.textContent = v
+    dl.append(dt, dd)
+  }
+}
+
+function renderStorage() {
+  const st = state.storage
+  $('storage').hidden = !st
+  if (!st) return
+  $('storage-dir').textContent = st.dir
+  $('st-music').textContent = fmtSize(st.music)
+  const hasDisk = st.total > 0
+  $('st-used').textContent = hasDisk ? fmtSize(st.used) : '未知'
+  $('st-total').textContent = hasDisk ? fmtSize(st.total) : '未知'
+  $('st-free').textContent = hasDisk ? fmtSize(st.free) : '未知'
+  $('bar-used').style.width = hasDisk ? (st.used / st.total * 100) + '%' : '0'
+  $('bar-music').style.width = hasDisk ? Math.max(st.music ? 0.5 : 0, st.music / st.total * 100) + '%' : '0'
+}
+
+// 开始 / 暂停 / 继续：当前曲目切换暂停，其他曲目从头播放
+function togglePlay(name) {
+  if (name === state.track && state.status !== 'stopped') return run(() => api('/api/pause'))
+  selected = name
+  return run(() => api('/api/play', { name }))
+}
+
+function deleteTrack(info) {
+  if (!confirm('删除「' + info.title + '」？\n文件 ' + trackPath(info.name) + ' 会被永久删除。')) return
+  if (selected === info.name) selected = ''
+  run(() => api('/api/delete', { name: info.name }))
+}
+
+function renderList() {
+  const key = JSON.stringify([state.tracks, state.track, state.status, selected])
+  if (key === lastListKey) return
+  lastListKey = key
+  const list = $('tracks')
+  list.innerHTML = ''
+  $('empty').hidden = state.tracks.length > 0
+  for (const info of state.tracks) {
+    const li = document.createElement('li')
+    const isCurrent = info.name === state.track && state.status !== 'stopped'
+    if (isCurrent) li.classList.add('current')
+    if (info.name === selected) li.classList.add('selected')
+    const cover = document.createElement('div')
+    cover.className = 'cover'
+    setCover(cover, info)
+    const box = document.createElement('div')
+    box.className = 'info'
+    const title = document.createElement('div')
+    title.className = 'title'
+    title.textContent = info.title
+    const sub = document.createElement('div')
+    sub.className = 'sub muted'
+    sub.textContent = [info.artist, info.duration ? fmtDuration(info.duration) : '', fmtSize(info.size)].filter(Boolean).join(' · ')
+    box.append(title, sub)
+    const play = document.createElement('button')
+    play.textContent = isCurrent ? (state.status === 'playing' ? '暂停' : '继续') : '播放'
+    if (isCurrent) play.classList.add('primary')
+    play.onclick = (ev) => { ev.stopPropagation(); togglePlay(info.name) }
+    const del = document.createElement('button')
+    del.className = 'danger'
+    del.textContent = '删除'
+    del.onclick = (ev) => { ev.stopPropagation(); deleteTrack(info) }
+    li.onclick = () => { selected = info.name; renderList(); renderDetail() }
+    li.append(cover, box, play, del)
+    list.append(li)
+  }
+}
+
+function currentPosition() {
+  let pos = positionBase
+  if (state.status === 'playing') pos += (Date.now() - positionAt) / 1000
+  return state.duration ? Math.min(pos, state.duration) : pos
+}
+
+function renderSeek() {
+  if (seeking) return
+  const active = state.status !== 'stopped'
+  const dur = active ? state.duration : 0
+  const pos = active ? currentPosition() : 0
+  $('seek').disabled = !active || !dur
+  $('seek').max = dur || 0
+  $('seek').value = pos
+  $('time-cur').textContent = fmtDuration(pos)
+  $('time-total').textContent = fmtDuration(dur)
+}
+
+function renderFooter() {
+  const active = state.status !== 'stopped'
+  const info = active ? findTrack(state.track) : null
+  setCover($('now-cover'), info)
+  $('now-title').textContent = active ? (info ? info.title : state.track) : '未在播放'
+  let status = { playing: '播放中', paused: '已暂停', stopped: '' }[state.status]
+  if (state.status === 'paused' && state.callPaused) status = '通话中已暂停'
+  if (state.call === 'active') status = (status ? status + ' · ' : '') + 'NexCall 通话中'
+  $('now-status').textContent = status
+  const playing = state.status === 'playing'
+  $('btn-toggle').textContent = playing ? '⏸' : '▶'
+  const label = playing ? '暂停' : (state.status === 'paused' ? '继续' : '播放')
+  $('btn-toggle').title = label
+  $('btn-toggle').setAttribute('aria-label', label)
+  $('btn-toggle').disabled = !state.tracks.length
+  $('btn-prev').disabled = $('btn-next').disabled = !state.tracks.length
+  $('btn-stop').disabled = !active
+  const mode = MODES[state.mode] || MODES.sequential
+  $('btn-mode').textContent = mode.icon + ' ' + mode.short
+  $('btn-mode').title = mode.label + '（点击切换）'
+  $('btn-mode').setAttribute('aria-label', '播放模式：' + mode.label)
+  if (Date.now() > volumeBusyUntil) showVolume(state.volume)
+  renderSeek()
+}
+
+function render() {
+  if (selected && !findTrack(selected)) selected = ''
+  renderDetail()
+  renderStorage()
+  renderList()
+  renderFooter()
+}
+
+async function refresh() {
+  try {
+    const res = await fetch('/api/state')
+    const text = await res.text()
+    if (text === lastJSON) return
+    lastJSON = text
+    state = JSON.parse(text)
+    positionBase = state.position || 0
+    positionAt = Date.now()
+    render()
+  } catch (e) {
+    showError('连不上播放器：' + e.message)
+  }
+}
+
+async function run(fn) {
+  showError('')
+  try {
+    await fn()
+  } catch (e) {
+    showError(e.message)
+  }
+  lastJSON = ''
+  await refresh()
+}
+
+$('btn-toggle').onclick = () => {
+  if (state.status !== 'stopped') return run(() => api('/api/pause'))
+  const name = findTrack(selected) ? selected : (findTrack(state.track) ? state.track : (state.tracks[0] || {}).name)
+  if (name) togglePlay(name)
+}
+$('btn-prev').onclick = () => run(() => api('/api/prev'))
+$('btn-next').onclick = () => run(() => api('/api/next'))
+$('btn-stop').onclick = () => run(() => api('/api/stop'))
+
+const MODES = {
+  sequential: { icon: '➡️', short: '顺序', label: '顺序播放：播完自动下一首，最后一首播完停止', next: 'shuffle' },
+  shuffle: { icon: '🔀', short: '随机', label: '随机播放', next: 'repeat_one' },
+  repeat_one: { icon: '🔂', short: '单曲', label: '单曲循环', next: 'sequential' },
+}
+$('btn-mode').onclick = () => {
+  const next = (MODES[state.mode] || MODES.sequential).next
+  run(() => api('/api/mode', { mode: next }))
+}
+
+// 拖动进度条时只更新时间显示，松手再跳转
+$('seek').oninput = () => {
+  seeking = true
+  $('time-cur').textContent = fmtDuration(Number($('seek').value))
+}
+$('seek').onchange = () => {
+  const position = Number($('seek').value)
+  seeking = false
+  positionBase = position
+  positionAt = Date.now()
+  run(() => api('/api/seek', { position }))
+}
+setInterval(renderSeek, 250)
+
+function showVolume(v) {
+  $('volume').value = v
+  $('volume-text').textContent = v + '%'
+}
+
+// 拖动滑块时最多每 150ms 发一次，松手时再发最终值
+let volumeTimer = null
+function sendVolume() {
+  volumeTimer = null
+  api('/api/volume', { volume: Number($('volume').value) }).catch((e) => showError(e.message))
+}
+$('volume').oninput = () => {
+  volumeBusyUntil = Date.now() + 1500
+  $('volume-text').textContent = $('volume').value + '%'
+  if (!volumeTimer) volumeTimer = setTimeout(sendVolume, 150)
+}
+$('volume').onchange = () => {
+  volumeBusyUntil = Date.now() + 1500
+  clearTimeout(volumeTimer)
+  sendVolume()
+}
+
+function upload(fileList) {
+  const files = [], skipped = []
+  for (const f of fileList) {
+    if (!/\.mp3$/i.test(f.name)) skipped.push(f.name + '（不是 MP3）')
+    else if (f.size > MAX_BYTES) skipped.push(f.name + '（超过 {{ max_mb }} MB）')
+    else files.push(f)
+  }
+  showError(skipped.length ? '已跳过：' + skipped.join('、') : '')
+  if (!files.length) return
+  const form = new FormData()
+  for (const f of files) form.append('file', f)
+  const xhr = new XMLHttpRequest()
+  const bar = $('progress')
+  bar.style.display = 'block'
+  bar.value = 0
+  xhr.upload.onprogress = (e) => { if (e.lengthComputable) bar.value = e.loaded / e.total * 100 }
+  xhr.onloadend = () => {
+    bar.style.display = 'none'
+    $('file').value = ''
+    let data = {}
+    try { data = JSON.parse(xhr.responseText) } catch (_) {}
+    if (xhr.status !== 200) showError(data.error || ('上传失败 ' + (xhr.status || '网络错误')))
+    else if (data.saved && data.saved.length) selected = data.saved[data.saved.length - 1]
+    lastJSON = ''
+    refresh()
+  }
+  xhr.open('POST', '/api/upload')
+  xhr.send(form)
+}
+
+$('file').onchange = () => upload($('file').files)
+
+// 整个页面都可以拖放；用计数器避免经过子元素时闪烁
+let dragDepth = 0
+const hasFiles = (e) => e.dataTransfer && Array.from(e.dataTransfer.types).includes('Files')
+window.addEventListener('dragenter', (e) => {
+  if (!hasFiles(e)) return
+  e.preventDefault()
+  dragDepth++
+  document.body.classList.add('dragging')
+})
+window.addEventListener('dragover', (e) => { if (hasFiles(e)) e.preventDefault() })
+window.addEventListener('dragleave', () => {
+  if (dragDepth > 0 && --dragDepth === 0) document.body.classList.remove('dragging')
+})
+window.addEventListener('drop', (e) => {
+  if (!hasFiles(e)) return
+  e.preventDefault()
+  dragDepth = 0
+  document.body.classList.remove('dragging')
+  upload(e.dataTransfer.files)
+})
+
+refresh()
+setInterval(refresh, 2000)
+</script>
+</body>
+</html>
