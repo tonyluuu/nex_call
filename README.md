@@ -85,7 +85,7 @@ nex_call/
 2. 准备 `device-agent` 二进制（任选其一）：
    - 在 Actions 的 `device` 运行里下载 artifact `device-agent-linux-arm64`。它按 Ubuntu 18.04（glibc 2.27）构建，bookworm 和 18.04 都能直接安装。手动运行该工作流，或 `device/` 有变更并推送到 `main` 时自动打包。派上的 `device.env` 和 systemd 不会被 Actions 修改。
    - 在电脑上打出同一份二进制：`cd device && docker buildx build --platform linux/arm64 -f Dockerfile.bionic -o type=local,dest=./dist .`
-   - 在香橙派上直接编译（官方 Go 压缩包是静态链接的，18.04 能跑）：`export PATH=$PATH:/usr/local/go/bin` 后执行 `cd device && CGO_ENABLED=1 go build -tags nolibopusfile -o device-agent ./cmd/device-agent`。内存只有 1GB 时先加交换分区，否则编译会被杀掉：`sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile`
+   - 在香橙派上直接编译（官方 Go 压缩包是静态链接的，18.04 能跑）：`export PATH=$PATH:/usr/local/go/bin` 后执行 `cd device && CGO_ENABLED=1 go build -tags nolibopusfile -o device-agent ./cmd/device-agent`。18.04 自带的 libopus 过旧，`setup.sh` 会另装 1.3.1。内存只有 1GB 时先加交换分区，否则编译会被杀掉：`sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile`
 3. 安装为 systemd 服务并填写配置：
    ```bash
    ./install.sh ./device-agent

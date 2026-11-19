@@ -1,7 +1,8 @@
 # 构建可在 Ubuntu 18.04 arm64（glibc 2.27）上运行的 device-agent。
 # Actions 的 device 工作流使用本文件。glibc 向后兼容，这份二进制在 bookworm 上也能跑。
 #   docker buildx build --platform linux/arm64 -f Dockerfile.bionic -o type=local,dest=./dist .
-# 产物 dist/device-agent。运行时依赖 libopus0（setup.sh 会安装）。
+# 产物 dist/device-agent。libopus 1.3.1 静态链接进二进制，运行时不依赖系统 libopus。
+# Ubuntu 18.04 自带的 libopus 1.1.2 没有 OPUS_GET_IN_DTX，直接用它链接会失败。
 FROM ubuntu:18.04 AS build
 ENV DEBIAN_FRONTEND=noninteractive
 RUN if [ "$(uname -m)" != "aarch64" ]; then echo "请使用 docker buildx build --platform linux/arm64" >&2; exit 1; fi
@@ -15,8 +16,29 @@ RUN set -eux; \
       apt-get update; \
     fi; \
     apt-get install -y --no-install-recommends \
-      ca-certificates curl gcc libc6-dev pkg-config libopus-dev; \
+      ca-certificates curl gcc libc6-dev make pkg-config; \
     rm -rf /var/lib/apt/lists/*
+# 1.3 起才有 OPUS_GET_IN_DTX。静态链接，避免运行时落到系统的 libopus 1.1.2。
+ARG OPUS_VERSION=1.3.1
+RUN set -eux; \
+    curl -fL --retry 2 --connect-timeout 20 --max-time 120 -o /tmp/opus.tar.gz \
+      "https://downloads.xiph.org/releases/opus/opus-${OPUS_VERSION}.tar.gz" \
+    || curl -fL --retry 2 --connect-timeout 20 --max-time 120 -o /tmp/opus.tar.gz \
+      "https://github.com/xiph/opus/releases/download/v${OPUS_VERSION}/opus-${OPUS_VERSION}.tar.gz"; \
+    mkdir -p /tmp/opus-src; \
+    tar -C /tmp/opus-src --strip-components=1 -xzf /tmp/opus.tar.gz; \
+    cd /tmp/opus-src; \
+    ./configure --disable-shared --enable-static --prefix=/usr/local --disable-doc; \
+    make -j"$(nproc)"; \
+    make install; \
+    pc=$(find /usr/local -name opus.pc | head -1); \
+    test -n "$pc"; \
+    libdir=$(PKG_CONFIG_PATH="$(dirname "$pc")" pkg-config --variable=libdir opus); \
+    sed -i "s|^Libs:.*|Libs: ${libdir}/libopus.a -lm|" "$pc"; \
+    test -f /usr/local/lib/pkgconfig/opus.pc; \
+    PKG_CONFIG_PATH=/usr/local/lib/pkgconfig pkg-config --libs opus | grep -q 'libopus.a'; \
+    rm -rf /tmp/opus.tar.gz /tmp/opus-src
+ENV PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
 # 与 go.mod 里的 go 版本保持一致
 ARG GO_VERSION=1.26.8
 RUN curl -fL --retry 2 --connect-timeout 20 --max-time 180 -o /tmp/go.tgz \

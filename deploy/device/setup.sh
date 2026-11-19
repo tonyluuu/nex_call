@@ -31,6 +31,50 @@ ensure_user_runtime() {
   fi
 }
 
+opus_has_in_dtx() {
+  pkg-config --exists opus || return 1
+  local cflags
+  cflags=$(pkg-config --cflags opus) || return 1
+  # shellcheck disable=SC2086
+  printf '#include <opus.h>\n' | gcc -E -dM $cflags - 2>/dev/null | grep -q 'OPUS_GET_IN_DTX' || return 1
+}
+
+# Ubuntu 18.04 的 libopus 1.1.2 没有 OPUS_GET_IN_DTX，device-agent 链不过。
+# 装一份 1.3.1 静态库到 /usr/local，供在派上直接编译时使用。
+install_opus_if_old() {
+  if opus_has_in_dtx; then
+    return
+  fi
+  local ver=1.3.1 url ok=0
+  echo "==> 系统 libopus 过旧，编译安装 ${ver}"
+  for url in \
+    "https://downloads.xiph.org/releases/opus/opus-${ver}.tar.gz" \
+    "https://github.com/xiph/opus/releases/download/v${ver}/opus-${ver}.tar.gz"
+  do
+    if curl -fL --retry 2 --connect-timeout 15 --max-time 120 -o /tmp/opus.tar.gz "$url"; then
+      ok=1
+      break
+    fi
+  done
+  [[ "$ok" == 1 ]] || { echo "下载 libopus ${ver} 失败"; exit 1; }
+  rm -rf /tmp/opus-src
+  mkdir -p /tmp/opus-src
+  tar -C /tmp/opus-src --strip-components=1 -xzf /tmp/opus.tar.gz
+  (
+    cd /tmp/opus-src
+    ./configure --disable-shared --enable-static --prefix=/usr/local --disable-doc
+    make -j"$(nproc)"
+    sudo make install
+  )
+  local pc libdir
+  pc=$(find /usr/local -name opus.pc | head -1)
+  libdir=$(PKG_CONFIG_PATH="$(dirname "$pc")" pkg-config --variable=libdir opus)
+  sudo sed -i "s|^Libs:.*|Libs: ${libdir}/libopus.a -lm|" "$pc"
+  grep -q '/usr/local/lib/pkgconfig' ~/.profile || echo 'export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}' >> ~/.profile
+  export PKG_CONFIG_PATH="/usr/local/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+  rm -rf /tmp/opus-src /tmp/opus.tar.gz
+}
+
 install_go() {
   echo "==> 安装 Go ${GO_VERSION}（发行版自带的 Go 版本太旧）"
   if ! /usr/local/go/bin/go version 2>/dev/null | grep -q "go${GO_VERSION}"; then
@@ -151,6 +195,7 @@ if pkg_exists pipewire && pkg_exists wireplumber && pkg_exists libspa-0.2-module
 else
   setup_pulse
 fi
+install_opus_if_old
 
 echo "==> GPIO 访问权限"
 sudo usermod -aG gpio "$RUN_USER" 2>/dev/null || {
