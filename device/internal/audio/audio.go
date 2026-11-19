@@ -1,5 +1,6 @@
 // Package audio 通过 miniaudio（malgo）读写声卡。
-// 在香橙派上走 PulseAudio 后端，实际连接的是 PipeWire 的回声消除虚拟设备。
+// 在香橙派上走 PulseAudio 后端。bookworm 上实际连接 PipeWire 的回声消除设备，
+// Ubuntu 18.04 上连接 PulseAudio module-echo-cancel 的同名虚拟设备。
 package audio
 
 import (

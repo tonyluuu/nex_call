@@ -1,0 +1,30 @@
+# 构建可在 Ubuntu 18.04 arm64（glibc 2.27）上运行的 device-agent。
+# 默认 Dockerfile 在 Debian bookworm 上链接 glibc 2.36，拷到 18.04 会报 GLIBC_2.34 not found。
+#   docker buildx build --platform linux/arm64 -f Dockerfile.bionic -o type=local,dest=./dist .
+# 产物 dist/device-agent。运行时依赖 libopus0（setup.sh 会安装）。
+FROM ubuntu:18.04 AS build
+ENV DEBIAN_FRONTEND=noninteractive
+RUN if [ "$(uname -m)" != "aarch64" ]; then echo "请使用 docker buildx build --platform linux/arm64" >&2; exit 1; fi
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates curl gcc libc6-dev pkg-config libopus-dev \
+    && rm -rf /var/lib/apt/lists/*
+# 与 go.mod 里的 go 版本保持一致
+ARG GO_VERSION=1.26.8
+RUN curl -fL --retry 2 --connect-timeout 20 --max-time 180 -o /tmp/go.tgz \
+      "https://mirrors.aliyun.com/golang/go${GO_VERSION}.linux-arm64.tar.gz" \
+    || curl -fL --retry 2 --connect-timeout 20 --max-time 180 -o /tmp/go.tgz \
+      "https://go.dev/dl/go${GO_VERSION}.linux-arm64.tar.gz" \
+    && rm -rf /usr/local/go && tar -C /usr/local -xzf /tmp/go.tgz && rm /tmp/go.tgz
+ENV PATH=/usr/local/go/bin:$PATH
+WORKDIR /src
+ENV CGO_ENABLED=1 GOFLAGS=-tags=nolibopusfile \
+    GOPROXY=https://goproxy.cn,direct \
+    GOSUMDB=sum.golang.google.cn
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN go vet ./... && go test ./... && \
+    go build -trimpath -ldflags "-s -w" -o /out/device-agent ./cmd/device-agent
+
+FROM scratch
+COPY --from=build /out/device-agent /device-agent

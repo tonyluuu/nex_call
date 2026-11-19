@@ -5,13 +5,14 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-# PipeWire 是按用户运行的，服务必须以该用户身份运行并能访问其运行时目录。
-# install.sh 会把 orangepi / 1000 替换成实际用户和 UID。
+# 音频服务按用户运行（PipeWire 或 PulseAudio）。本服务必须以该用户身份运行，
+# 并能访问其运行时目录。install.sh 会把 orangepi / 1000 替换成实际用户和 UID。
 User=orangepi
 SupplementaryGroups=audio gpio
 EnvironmentFile=/etc/nexcall/device.env
 Environment=XDG_RUNTIME_DIR=/run/user/1000
 Environment=PULSE_SERVER=unix:/run/user/1000/pulse/native
+ExecStartPre=/bin/sh -c 'sock="$${XDG_RUNTIME_DIR}/pulse/native"; i=0; while [ ! -S "$$sock" ] && [ "$$i" -lt 30 ]; do i=$$((i+1)); sleep 1; done; if [ ! -S "$$sock" ]; then echo "等待音频套接字超时: $$sock" >&2; exit 1; fi'
 ExecStart=/usr/local/bin/device-agent
 Restart=always
 RestartSec=3

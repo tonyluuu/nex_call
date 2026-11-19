@@ -5,7 +5,7 @@
 ```
 nex_call/
   server/   call-server（Go）：登录、设备注册、呼叫信令、LiveKit Token、SQLite 通话记录
-  device/   device-agent（Go，arm64）：PipeWire 音频 + Opus + LiveKit，按键/LED，断线重连
+  device/   device-agent（Go，arm64）：PipeWire 或 PulseAudio 音频 + Opus + LiveKit，按键/LED，断线重连
   web/      网页端（Vite + TypeScript + livekit-client）
   deploy/   docker-compose、Caddyfile、livekit.yaml、IP 证书脚本；device/ 下是香橙派的配置和脚本
 ```
@@ -70,25 +70,31 @@ nex_call/
 - 网页呼叫另一个网页时，对方自动进入同一个临时房间；其他人可以在「进行中的通话」里加入。最后一名网页用户离开后，这次通话结束。
 - 一个人同时只在一个房间里。管理员在「管理」页可以查看全部通话，并把网页参与者移出房间（不能移出 Pi）。
 
-## 二、香橙派 Zero2
+## 二、香橙派
 
-1. 刷 Armbian（Debian bookworm），接 USB 声卡或 USB 会议麦克风。
-2. 初始化音频环境（PipeWire + WebRTC 回声消除），并自检：
+系统是 arm64（`uname -m` 为 `aarch64`），接 USB 声卡或 USB 会议麦克风。`setup.sh` 会按系统选择音频栈，虚拟设备名都是 `echo-cancel-source` / `echo-cancel-sink`：
+
+- Armbian / Debian bookworm：PipeWire。
+- 已经在用的 Ubuntu 18.04（Orange Pi 官方 Bionic 镜像）：没有 PipeWire，改用 PulseAudio 11 的 WebRTC 回声消除。内核要在 3.2 以上，这套官方镜像一般是 4.9 或更新。
+
+1. 初始化音频环境并自检：
    ```bash
    cd deploy/device && ./setup.sh && ./audio-test.sh
    ```
-3. 编译 device-agent（任选其一）：
-   - 在电脑上用 Docker 交叉编译：`cd device && docker buildx build --platform linux/arm64 -o type=local,dest=./dist .`，然后把 `dist/device-agent` 拷到香橙派。
-   - 在香橙派上直接编译：`cd device && CGO_ENABLED=1 go build -tags nolibopusfile -o device-agent ./cmd/device-agent`
-   - 在 Actions 的 `device` 运行里下载 artifact `device-agent-linux-arm64`。手动运行该工作流，或 `device/` 有变更并推送到 `main` 时自动打包。派上的 `device.env` 和 systemd 不会被 Actions 修改。
-4. 安装为 systemd 服务并填写配置：
+   Ubuntu 18.04 若 `apt-get update` 失败，把源里的 `ports.ubuntu.com` 换成 `old-releases.ubuntu.com`，路径仍是 `ubuntu-ports`。
+2. 编译 device-agent：
+   - bookworm，在电脑上交叉编译：`cd device && docker buildx build --platform linux/arm64 -o type=local,dest=./dist .`，把 `dist/device-agent` 拷到香橙派。
+   - bookworm，在 Actions 的 `device` 运行里下载 artifact `device-agent-linux-arm64`。手动运行该工作流，或 `device/` 有变更并推送到 `main` 时自动打包。派上的 `device.env` 和 systemd 不会被 Actions 修改。
+   - Ubuntu 18.04 不能用上面两个二进制（在 bookworm 上链接 glibc 2.36，启动会报 `GLIBC_2.34 not found`）。在电脑上改用：`cd device && docker buildx build --platform linux/arm64 -f Dockerfile.bionic -o type=local,dest=./dist .`
+   - 在香橙派上直接编译（官方 Go 压缩包是静态链接的，18.04 能跑）：`export PATH=$PATH:/usr/local/go/bin` 后执行 `cd device && CGO_ENABLED=1 go build -tags nolibopusfile -o device-agent ./cmd/device-agent`。内存只有 1GB 时先加交换分区，否则编译会被杀掉：`sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile`
+3. 安装为 systemd 服务并填写配置：
    ```bash
    ./install.sh ./device-agent
    sudo nano /etc/nexcall/device.env     # SERVER_URL=https://<公网IP>/nexcall、DEVICE_ID、DEVICE_SECRET
    sudo systemctl restart device-agent && journalctl -u device-agent -f
    ```
 
-按键与指示灯（`BUTTON_LINE` / `LED_LINE` 用 `gpioinfo` 查线号）：
+按键与指示灯（`BUTTON_LINE` / `LED_LINE` 用 `gpioinfo` 查线号；Ubuntu 18.04 源里通常没有这个命令，不用按键和灯时保持 `-1`）：
 
 | 状态 | 短按 | LED |
 | --- | --- | --- |
@@ -150,7 +156,7 @@ device-agent 每 10 秒打印一次 `call stats`：收发包数、丢包、FEC �
 ## 五、常见问题
 
 - 网页提示"不是 HTTPS"：浏览器只在 HTTPS 或 localhost 下开放麦克风，必须通过 `https://<公网IP>/nexcall/` 访问。
-- 从旧版升级：推送到 `main` 后，`web/` 的变更只更新网页，`server/` 或 `deploy/`（不含 `deploy/device/`）的变更才重建 call-server。香橙派另行下载 `device` 工作流的二进制，换上后执行 `sudo systemctl restart device-agent`。`SERVER_URL` 须为 `https://<公网IP>/nexcall`。需要管理员时执行 `call-server user role <用户名> admin`。旧的一对一振铃呼叫不再使用。
+- 从旧版升级：推送到 `main` 后，`web/` 的变更只更新网页，`server/` 或 `deploy/`（不含 `deploy/device/`）的变更才重建 call-server。bookworm 香橙派另行下载 `device` 工作流的二进制，换上后执行 `sudo systemctl restart device-agent`。Ubuntu 18.04 不能用 Actions 里的那份，要换 `Dockerfile.bionic` 编出来的二进制。`SERVER_URL` 须为 `https://<公网IP>/nexcall`。需要管理员时执行 `call-server user role <用户名> admin`。旧的一对一振铃呼叫不再使用。
 - 能登录但通话无声：检查安全组是否放通 UDP 7882 / TCP 7881，以及 LiveKit 日志里的 `nodeIP` 是否为公网 IP。
 - 设备一直重连并提示 `unauthorized`：`DEVICE_SECRET` 不对，重新执行 `call-server device add` 生成新密钥。
 - 自签名证书兜底时：把服务器的 `deploy/certs/fullchain.pem` 拷到香橙派，在 `device.env` 里设置 `CA_CERT`。

@@ -1,0 +1,13 @@
+# 安装到 ~/.config/pulse/default.pa。
+# 用户配置会替代 /etc/pulse/default.pa，所以先把系统脚本引进来。
+# Ubuntu 18.04 的 PulseAudio 11 没有 PipeWire。module-echo-cancel 的 WebRTC
+# 实现生成与 PipeWire 同名的虚拟设备，device-agent 继续使用系统默认设备：
+#   echo-cancel-source  已做回声消除的麦克风
+#   echo-cancel-sink    播放设备，同时作为回声消除的参考信号
+.include /etc/pulse/default.pa
+
+.ifexists module-echo-cancel.so
+load-module module-echo-cancel use_master_format=1 aec_method=webrtc source_name=echo-cancel-source sink_name=echo-cancel-sink
+set-default-source echo-cancel-source
+set-default-sink echo-cancel-sink
+.endif
