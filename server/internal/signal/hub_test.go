@@ -184,10 +184,14 @@ func TestWebCallAutoInviteAndThirdJoin(t *testing.T) {
 
 	h.Handle(bob, Message{Type: TypeLeave})
 	expect(t, bob, TypeLeft)
+	expectNone(t, alice)
+	expectNone(t, cara)
+
 	h.Handle(cara, Message{Type: TypeLeave})
 	expect(t, cara, TypeLeft)
-	h.Handle(alice, Message{Type: TypeLeave})
-	expect(t, alice, TypeLeft)
+	if m := expect(t, alice, TypeLeft); m.Reason != ReasonPeerLeft {
+		t.Fatalf("alice left %+v", m)
+	}
 
 	h.Handle(cara, Message{Type: TypeJoin, Room: inv.Room})
 	if m := expect(t, cara, TypeError); m.Reason != "no such room" {
@@ -287,4 +291,136 @@ func TestNotifyTargets(t *testing.T) {
 	h.Handle(dev, Message{Type: TypeNotify})
 	expect(t, alice, TypeNotify)
 	expect(t, bob, TypeNotify)
+}
+
+func TestPeerLeaveEndsCallForTheOther(t *testing.T) {
+	h, rec := newTestHub()
+	alice := register(t, h, KindWeb, "alice")
+	bob := register(t, h, KindWeb, "bob")
+
+	h.Handle(alice, Message{Type: TypeCall, To: "web:bob"})
+	room := expect(t, alice, TypeJoined).Room
+	expect(t, bob, TypeInvite)
+	h.Handle(bob, Message{Type: TypeJoin, Room: room})
+	expect(t, bob, TypeJoined)
+
+	h.Handle(alice, Message{Type: TypeLeave})
+	if m := expect(t, alice, TypeLeft); m.Reason != ReasonNormal {
+		t.Fatalf("alice %+v", m)
+	}
+	if m := expect(t, bob, TypeLeft); m.Reason != ReasonPeerLeft || m.Room != room {
+		t.Fatalf("bob %+v", m)
+	}
+	for _, r := range h.presence().Rooms {
+		if r.ID == room {
+			t.Fatalf("room still listed %+v", r)
+		}
+	}
+	h.Handle(bob, Message{Type: TypeJoin, Room: room})
+	if m := expect(t, bob, TypeError); m.Reason != "no such room" {
+		t.Fatalf("rejoin %+v", m)
+	}
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.opened != 1 || len(rec.closed) != 1 {
+		t.Fatalf("records opened=%d closed=%v", rec.opened, rec.closed)
+	}
+	for _, reason := range rec.closed {
+		if reason != ReasonPeerLeft {
+			t.Fatalf("close reason %s", reason)
+		}
+	}
+}
+
+func TestThreePartyLeaveKeepsTheRest(t *testing.T) {
+	h, _ := newTestHub()
+	alice := register(t, h, KindWeb, "alice")
+	bob := register(t, h, KindWeb, "bob")
+	cara := register(t, h, KindWeb, "cara")
+
+	h.Handle(alice, Message{Type: TypeCall, To: "web:bob"})
+	room := expect(t, alice, TypeJoined).Room
+	expect(t, bob, TypeInvite)
+	h.Handle(bob, Message{Type: TypeJoin, Room: room})
+	expect(t, bob, TypeJoined)
+	h.Handle(cara, Message{Type: TypeJoin, Room: room})
+	expect(t, cara, TypeJoined)
+
+	h.Handle(alice, Message{Type: TypeLeave})
+	expect(t, alice, TypeLeft)
+	expectNone(t, bob)
+	expectNone(t, cara)
+
+	h.Handle(bob, Message{Type: TypeLeave})
+	expect(t, bob, TypeLeft)
+	if m := expect(t, cara, TypeLeft); m.Reason != ReasonPeerLeft {
+		t.Fatalf("cara %+v", m)
+	}
+}
+
+func TestWebLeaveKeepsDeviceInRoom(t *testing.T) {
+	h, _ := newTestHub()
+	dev := register(t, h, KindDevice, "pi1")
+	alice := register(t, h, KindWeb, "alice")
+
+	h.Handle(alice, Message{Type: TypeJoin, Room: "device:pi1"})
+	expect(t, alice, TypeJoined)
+	h.Handle(alice, Message{Type: TypeLeave})
+	if m := expect(t, alice, TypeLeft); m.Reason != ReasonNormal {
+		t.Fatalf("alice %+v", m)
+	}
+	expectNone(t, dev)
+	if h.peerRoom[dev] != DeviceRoom("pi1") {
+		t.Fatal("device left its room")
+	}
+	for _, r := range h.presence().Rooms {
+		for _, m := range r.Members {
+			if m.Kind == KindWeb {
+				t.Fatalf("web still listed %+v", r)
+			}
+		}
+	}
+	if s := h.Snapshot(); s[0].ID == "pi1" && s[0].Busy {
+		t.Fatal("device still busy")
+	}
+}
+
+func TestDeviceDisconnectEndsWebCall(t *testing.T) {
+	h, _ := newTestHub()
+	dev := register(t, h, KindDevice, "pi1")
+	alice := register(t, h, KindWeb, "alice")
+	h.Handle(alice, Message{Type: TypeJoin, Room: "device:pi1"})
+	expect(t, alice, TypeJoined)
+
+	h.Unregister(dev)
+	if m := expect(t, alice, TypeLeft); m.Reason != ReasonPeerLeft {
+		t.Fatalf("alice %+v", m)
+	}
+}
+
+func TestWaitingTimeout(t *testing.T) {
+	rec := &fakeRecorder{}
+	h := NewHub(fakeTokens{}, rec, fakeDir{ids: []string{"pi1"}}, "wss://test", 40*time.Millisecond)
+	alice := register(t, h, KindWeb, "alice")
+	bob := register(t, h, KindWeb, "bob")
+
+	h.Handle(alice, Message{Type: TypeCall, To: "web:bob"})
+	room := expect(t, alice, TypeJoined).Room
+	expect(t, bob, TypeInvite)
+
+	if m := expect(t, alice, TypeLeft); m.Reason != ReasonTimeout || m.Room != room {
+		t.Fatalf("timeout %+v", m)
+	}
+	h.Handle(bob, Message{Type: TypeJoin, Room: room})
+	if m := expect(t, bob, TypeError); m.Reason != "no such room" {
+		t.Fatalf("join after timeout %+v", m)
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	for _, reason := range rec.closed {
+		if reason != ReasonTimeout {
+			t.Fatalf("close reason %s", reason)
+		}
+	}
 }

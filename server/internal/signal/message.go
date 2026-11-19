@@ -28,6 +28,8 @@ const (
 	ReasonOffline      = "offline"
 	ReasonDisconnected = "disconnected"
 	ReasonKicked       = "kicked"
+	ReasonPeerLeft     = "peer_left"
+	ReasonTimeout      = "timeout"
 	RoleAdmin          = "admin"
 	RoleUser           = "user"
 )

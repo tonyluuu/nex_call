@@ -77,14 +77,16 @@ type room struct {
 	recorded map[*Peer]struct{}
 	recordID string
 	started  time.Time
+	timer    *time.Timer
 }
 
 type Hub struct {
-	tokens     TokenIssuer
-	recorder   Recorder
-	devices    DeviceDirectory
-	remover    Remover
-	livekitURL string
+	tokens      TokenIssuer
+	recorder    Recorder
+	devices     DeviceDirectory
+	remover     Remover
+	livekitURL  string
+	ringTimeout time.Duration
 
 	mu       sync.Mutex
 	devPeers map[string]*Peer
@@ -93,16 +95,20 @@ type Hub struct {
 	peerRoom map[*Peer]string
 }
 
-func NewHub(tokens TokenIssuer, recorder Recorder, devices DeviceDirectory, livekitURL string, _ time.Duration) *Hub {
+func NewHub(tokens TokenIssuer, recorder Recorder, devices DeviceDirectory, livekitURL string, ringTimeout time.Duration) *Hub {
+	if ringTimeout <= 0 {
+		ringTimeout = 45 * time.Second
+	}
 	return &Hub{
-		tokens:     tokens,
-		recorder:   recorder,
-		devices:    devices,
-		livekitURL: livekitURL,
-		devPeers:   map[string]*Peer{},
-		webPeers:   map[string]map[*Peer]struct{}{},
-		rooms:      map[string]*room{},
-		peerRoom:   map[*Peer]string{},
+		tokens:      tokens,
+		recorder:    recorder,
+		devices:     devices,
+		livekitURL:  livekitURL,
+		ringTimeout: ringTimeout,
+		devPeers:    map[string]*Peer{},
+		webPeers:    map[string]map[*Peer]struct{}{},
+		rooms:       map[string]*room{},
+		peerRoom:    map[*Peer]string{},
 	}
 }
 
@@ -258,6 +264,9 @@ func (h *Hub) join(p *Peer, ref string) {
 		h.leaveLocked(p, ReasonNormal)
 		return
 	}
+	if len(r.members) < 2 {
+		h.armWaitLocked(r)
+	}
 	slog.Info("joined room", "room", r.id, "peer", p.Address())
 	h.broadcastPresenceLocked()
 }
@@ -329,6 +338,7 @@ func (h *Hub) call(p *Peer, to string) {
 		return
 	}
 	invitee.Send(Message{Type: TypeInvite, Room: r.id, From: p.Address()})
+	h.armWaitLocked(r)
 	slog.Info("adhoc room", "room", r.id, "from", p.Address(), "to", to)
 	h.broadcastPresenceLocked()
 }
@@ -465,6 +475,9 @@ func (h *Hub) addMemberLocked(r *room, p *Peer, caller, callee string) {
 	if r.recordID != "" {
 		h.recordJoinLocked(r, p, r.members[p])
 	}
+	if len(r.members) >= 2 {
+		h.stopWaitLocked(r)
+	}
 }
 
 func (h *Hub) recordJoinLocked(r *room, p *Peer, at time.Time) {
@@ -497,28 +510,100 @@ func (h *Hub) leaveLocked(p *Peer, reason string) {
 	if reason != ReasonKicked {
 		p.Send(Message{Type: TypeLeft, Room: r.id, Reason: reason})
 	}
-	if h.webCount(r) == 0 && r.recordID != "" {
-		now := time.Now()
-		for m := range r.members {
-			if _, ok := r.recorded[m]; ok {
-				delete(r.recorded, m)
-				_ = h.recorder.ParticipantLeft(context.Background(), r.recordID, m.Address(), reason, now)
-			}
-		}
-		if err := h.recorder.RoomClosed(context.Background(), r.recordID, reason, now); err != nil {
-			slog.Error("room closed", "err", err)
-		}
-		r.recordID = ""
-		r.started = time.Time{}
-		r.recorded = map[*Peer]struct{}{}
+	if len(r.members) < 2 && h.webCount(r) > 0 {
+		h.closeCallLocked(r, ReasonPeerLeft)
+		slog.Info("left room", "room", rid, "peer", p.Address(), "reason", reason)
+		return
+	}
+	if h.webCount(r) == 0 {
+		h.finishRecordLocked(r, reason)
+		h.stopWaitLocked(r)
 	}
 	if r.deviceID == "" && h.webCount(r) == 0 {
+		h.stopWaitLocked(r)
 		delete(h.rooms, r.id)
 	}
 	if r.deviceID != "" && len(r.members) == 0 {
+		h.stopWaitLocked(r)
 		delete(h.rooms, r.id)
 	}
 	slog.Info("left room", "room", rid, "peer", p.Address(), "reason", reason)
+}
+
+// closeCallLocked 人数不足两人时结束通话：通知剩下的网页退出，临时房间删除，设备房间只留 Pi。
+func (h *Hub) closeCallLocked(r *room, reason string) {
+	h.stopWaitLocked(r)
+	now := time.Now()
+	var webs []*Peer
+	for m := range r.members {
+		if m.Kind == KindWeb {
+			webs = append(webs, m)
+		}
+	}
+	for _, m := range webs {
+		m.Send(Message{Type: TypeLeft, Room: r.id, Reason: reason})
+		delete(r.members, m)
+		delete(h.peerRoom, m)
+		h.recordLeaveLocked(r, m, reason, now)
+	}
+	h.finishRecordLocked(r, reason)
+	if r.deviceID == "" || len(r.members) == 0 {
+		delete(h.rooms, r.id)
+	}
+	slog.Info("call closed", "room", r.id, "reason", reason)
+}
+
+func (h *Hub) finishRecordLocked(r *room, reason string) {
+	if r.recordID == "" {
+		return
+	}
+	now := time.Now()
+	for m := range r.members {
+		h.recordLeaveLocked(r, m, reason, now)
+	}
+	if err := h.recorder.RoomClosed(context.Background(), r.recordID, reason, now); err != nil {
+		slog.Error("room closed", "err", err)
+	}
+	r.recordID = ""
+	r.started = time.Time{}
+	r.recorded = map[*Peer]struct{}{}
+}
+
+func (h *Hub) recordLeaveLocked(r *room, p *Peer, reason string, at time.Time) {
+	if r.recordID == "" {
+		return
+	}
+	if _, ok := r.recorded[p]; !ok {
+		return
+	}
+	delete(r.recorded, p)
+	if err := h.recorder.ParticipantLeft(context.Background(), r.recordID, p.Address(), reason, at); err != nil {
+		slog.Error("participant left", "err", err)
+	}
+}
+
+func (h *Hub) armWaitLocked(r *room) {
+	if r.timer != nil || len(r.members) >= 2 || h.webCount(r) == 0 {
+		return
+	}
+	id := r.id
+	r.timer = time.AfterFunc(h.ringTimeout, func() {
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		cur := h.rooms[id]
+		if cur == nil || len(cur.members) >= 2 || h.webCount(cur) == 0 {
+			return
+		}
+		h.closeCallLocked(cur, ReasonTimeout)
+		h.broadcastPresenceLocked()
+	})
+}
+
+func (h *Hub) stopWaitLocked(r *room) {
+	if r.timer != nil {
+		r.timer.Stop()
+		r.timer = nil
+	}
 }
 
 func (h *Hub) webCount(r *room) int {

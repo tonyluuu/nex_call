@@ -25,6 +25,7 @@ interface CurrentCall {
   room: string
   phase: 'joining' | 'active'
   muted: boolean
+  minimized: boolean
   startedAt?: number
   media?: MediaCall
 }
@@ -35,6 +36,8 @@ const reasonText: Record<string, string> = {
   offline: '对方不在线',
   disconnected: '连接已断开',
   kicked: '已被管理员移出',
+  peer_left: '对方已离开，通话结束',
+  timeout: '无人加入，通话已结束',
 }
 
 let session: Session | null = null
@@ -252,18 +255,24 @@ function renderCalls(tbody: HTMLElement, calls: CallRecord[], expandable: boolea
 }
 
 function renderCall() {
-  $('call-overlay').classList.toggle('hidden', !current)
+  $('call-overlay').classList.toggle('hidden', !current || current.minimized)
+  $('call-mini').classList.toggle('hidden', !current?.minimized)
+  $('btn-minimize').classList.toggle('hidden', !isAdmin())
   renderDevices()
   renderUsers()
   renderRooms($('room-list'), false)
   if (isAdmin()) renderRooms($('admin-rooms'), true)
   if (!current) return
   const room = rooms.find((r) => r.id === current!.room)
-  $('call-peer').textContent = room ? roomLabel(room) : '正在进入…'
+  const title = room ? roomLabel(room) : '正在进入…'
+  $('call-peer').textContent = title
+  $('mini-peer').textContent = title
   $('call-state').textContent = current.phase === 'active' ? '通话中' : '正在进入…'
   $('btn-mute').classList.toggle('hidden', current.phase !== 'active')
   $('btn-mute').classList.toggle('active', current.muted)
   $('btn-mute').textContent = current.muted ? '取消静音' : '静音'
+  $('mini-mute').textContent = current.muted ? '取消静音' : '静音'
+  $('mini-mute').classList.toggle('active', current.muted)
   $('btn-hangup').textContent = '离开'
   $('call-timer').classList.toggle('hidden', current.phase !== 'active')
   const members = $('call-members')
@@ -279,7 +288,10 @@ function renderCall() {
 function startTimer() {
   clearInterval(timerHandle)
   timerHandle = window.setInterval(() => {
-    if (current?.startedAt) $('call-timer').textContent = fmtDuration(Date.now() - current.startedAt)
+    if (!current?.startedAt) return
+    const text = fmtDuration(Date.now() - current.startedAt)
+    $('call-timer').textContent = text
+    $('mini-timer').textContent = text
   }, 500)
 }
 
@@ -295,7 +307,7 @@ function joinRoom(room: string) {
     return
   }
   hideNotify()
-  current = { room, phase: 'joining', muted: false }
+  current = { room, phase: 'joining', muted: false, minimized: false }
   renderCall()
 }
 
@@ -310,7 +322,7 @@ function callUser(id: string) {
     banner('信令未连接，请稍后再试')
     return
   }
-  current = { room: '', phase: 'joining', muted: false }
+  current = { room: '', phase: 'joining', muted: false, minimized: false }
   renderCall()
 }
 
@@ -404,7 +416,7 @@ function onSignal(m: Message) {
       renderCall()
       break
     case 'joined':
-      if (!current) current = { room: m.room ?? '', phase: 'joining', muted: false }
+      if (!current) current = { room: m.room ?? '', phase: 'joining', muted: false, minimized: false }
       void connectMedia(m)
       break
     case 'invite':
@@ -415,7 +427,7 @@ function onSignal(m: Message) {
       if (m.room) showNotify(m.from ?? '', m.room)
       break
     case 'left':
-      if (current && current.room === m.room) void teardown(m.reason)
+      if (current && (!current.room || current.room === m.room)) void teardown(m.reason)
       break
     case 'kicked':
       if (current) void teardown('kicked')
@@ -482,6 +494,18 @@ $('refresh-admin-calls').onclick = () => void refreshCalls()
 $('tab-call').onclick = () => showTab(false)
 $('tab-admin').onclick = () => showTab(true)
 $('btn-hangup').onclick = hangup
+$('mini-hangup').onclick = hangup
+$('btn-minimize').onclick = () => {
+  if (!current || !isAdmin()) return
+  current.minimized = true
+  renderCall()
+}
+$('mini-expand').onclick = () => {
+  if (!current) return
+  current.minimized = false
+  renderCall()
+}
+$('mini-mute').onclick = () => $('btn-mute').click()
 $('btn-mute').onclick = async () => {
   if (!current?.media) return
   current.muted = !current.muted

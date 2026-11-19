@@ -67,6 +67,7 @@
 
       <div id="call-overlay" class="overlay hidden">
         <div class="call-card">
+          <button id="btn-minimize" class="link minimize hidden" type="button" title="缩小">缩小</button>
           <div id="call-peer" class="call-peer"></div>
           <div id="call-state" class="call-state"></div>
           <ul id="call-members" class="members"></ul>
@@ -78,6 +79,14 @@
           </div>
           <button id="btn-audio" class="link hidden">点击开启声音</button>
         </div>
+      </div>
+      <div id="call-mini" class="call-mini hidden">
+        <button id="mini-expand" class="mini-main" type="button" title="展开">
+          <span id="mini-peer"></span>
+          <span id="mini-timer">00:00</span>
+        </button>
+        <button id="mini-mute" type="button">静音</button>
+        <button id="mini-hangup" class="hangup" type="button">离开</button>
       </div>
     </div>
     <script type="module" src="/src/main.ts"></script>
