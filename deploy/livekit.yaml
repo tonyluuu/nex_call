@@ -1,0 +1,22 @@
+# 密钥通过环境变量 LIVEKIT_KEYS 注入，公网 IP 通过 --node-ip 注入（见 docker-compose.yml）
+port: 7880
+log_level: info
+
+rtc:
+  tcp_port: 7881
+  udp_port: 7882
+  use_external_ip: false
+  # 弱网下 NACK 重传、Opus 冗余由客户端协商，这里保持默认
+
+room:
+  # 双方都离开后房间很快回收
+  empty_timeout: 30
+  departure_timeout: 10
+  max_participants: 4
+
+turn:
+  enabled: true
+  udp_port: 3478
+  # 中继端口段；如果日志显示有客户端走 TURN 中继，需要在安全组放通这段 UDP
+  relay_range_start: 30000
+  relay_range_end: 30100

@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#0f172a" />
+    <title>NexCall 语音通话</title>
+  </head>
+  <body>
+    <div id="app">
+      <div id="banner" class="banner hidden"></div>
+
+      <section id="login-view" class="card login hidden">
+        <h1>NexCall</h1>
+        <p class="muted">香橙派语音通话</p>
+        <form id="login-form">
+          <label>用户名<input name="username" autocomplete="username" required /></label>
+          <label>密码<input name="password" type="password" autocomplete="current-password" required /></label>
+          <button type="submit" class="primary">登录</button>
+          <p id="login-error" class="error"></p>
+        </form>
+      </section>
+
+      <section id="main-view" class="hidden">
+        <header class="topbar">
+          <div class="brand">NexCall</div>
+          <div class="status"><span id="conn-dot" class="dot"></span><span id="conn-text">连接中</span></div>
+          <div class="user"><span id="user-name"></span><button id="logout" class="link">退出</button></div>
+        </header>
+
+        <main>
+          <h2>设备</h2>
+          <ul id="device-list" class="devices"></ul>
+
+          <h2>通话记录 <button id="refresh-calls" class="link">刷新</button></h2>
+          <table class="calls">
+            <thead><tr><th>时间</th><th>主叫</th><th>被叫</th><th>时长</th><th>结果</th></tr></thead>
+            <tbody id="call-list"></tbody>
+          </table>
+        </main>
+      </section>
+
+      <div id="call-overlay" class="overlay hidden">
+        <div class="call-card">
+          <div id="call-peer" class="call-peer"></div>
+          <div id="call-state" class="call-state"></div>
+          <div id="call-timer" class="call-timer hidden">00:00</div>
+          <div id="call-quality" class="muted small"></div>
+          <div class="call-actions">
+            <button id="btn-accept" class="round accept hidden" title="接听">接听</button>
+            <button id="btn-mute" class="round hidden" title="静音">静音</button>
+            <button id="btn-hangup" class="round hangup" title="挂断">挂断</button>
+          </div>
+          <button id="btn-audio" class="link hidden">点击开启声音</button>
+        </div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

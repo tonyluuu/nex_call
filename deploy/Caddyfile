@@ -1,0 +1,39 @@
+{
+	# 浏览器用 IP 访问时不发送 SNI，需要指定默认证书
+	default_sni {$PUBLIC_IP}
+	auto_https off
+}
+
+https://{$PUBLIC_IP} {
+	tls /certs/fullchain.pem /certs/privkey.pem
+
+	encode gzip
+
+	handle /api/* {
+		reverse_proxy call-server:8080
+	}
+	handle /ws/* {
+		reverse_proxy call-server:8080
+	}
+	handle /healthz {
+		reverse_proxy call-server:8080
+	}
+	handle /rtc* {
+		reverse_proxy host.docker.internal:7880
+	}
+	handle {
+		root * /srv/web
+		try_files {path} /index.html
+		file_server
+	}
+}
+
+http://{$PUBLIC_IP} {
+	handle /.well-known/acme-challenge/* {
+		root * /srv/acme
+		file_server
+	}
+	handle {
+		redir https://{host}{uri} permanent
+	}
+}

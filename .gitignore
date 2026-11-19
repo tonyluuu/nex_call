@@ -1,0 +1,13 @@
+node_modules/
+web/dist/
+device/dist/
+*.db
+*.db-shm
+*.db-wal
+go.work.sum
+.DS_Store
+
+deploy/.env
+deploy/certs/
+deploy/acme/
+deploy/lego/

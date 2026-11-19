@@ -1,0 +1,50 @@
+name: nex-call
+
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      PUBLIC_IP: ${PUBLIC_IP}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./certs:/certs:ro
+      - ./acme:/srv/acme:ro
+      - ../web/dist:/srv/web:ro
+      - caddy_data:/data
+    depends_on:
+      - call-server
+
+  call-server:
+    build:
+      context: ../server
+    restart: unless-stopped
+    environment:
+      LISTEN_ADDR: ":8080"
+      DB_PATH: /data/nexcall.db
+      LIVEKIT_URL: wss://${PUBLIC_IP}
+      LIVEKIT_API_KEY: ${LIVEKIT_API_KEY}
+      LIVEKIT_API_SECRET: ${LIVEKIT_API_SECRET}
+      SESSION_SECRET: ${SESSION_SECRET}
+    volumes:
+      - server_data:/data
+
+  # 使用 host 网络：媒体端口和 TURN 中继端口无需逐个映射，也避免 Docker NAT 再套一层
+  livekit:
+    image: livekit/livekit-server:latest
+    restart: unless-stopped
+    network_mode: host
+    command: --config /etc/livekit.yaml --node-ip ${PUBLIC_IP}
+    environment:
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
+
+volumes:
+  caddy_data:
+  server_data:
