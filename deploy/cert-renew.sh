@@ -61,14 +61,17 @@ if ! docker compose ps --status running caddy 2>/dev/null | grep -q caddy; then
 fi
 
 lego() {
+  # 镜像里 /lego 是入口二进制，数据目录必须挂 /.lego
+  # Let's Encrypt 拒绝把 IP 写进 CSR 的 CN，IP 证书必须 --disable-cn
   docker run --rm \
-    -v "$(pwd)/$LEGO_DIR:/lego" \
+    -v "$(pwd)/$LEGO_DIR:/.lego" \
     -v "$(pwd)/$ACME_DIR:/srv/acme" \
     "$LEGO_IMAGE" \
-    --path /lego \
+    --path /.lego \
     --email "$ACME_EMAIL" \
     --accept-tos \
     --domains "$PUBLIC_IP" \
+    --disable-cn \
     --http --http.webroot /srv/acme \
     "$@"
 }

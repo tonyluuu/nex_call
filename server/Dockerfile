@@ -2,6 +2,10 @@ FROM golang:1.26-alpine AS build
 WORKDIR /src
 ENV CGO_ENABLED=0
 COPY go.mod go.sum ./
+
+# 国内 VPS 访问 proxy.golang.org 会卡住 go mod download
+ENV GOPROXY=https://goproxy.cn,direct
+
 RUN go mod download
 COPY . .
 RUN go build -trimpath -ldflags "-s -w" -o /out/call-server ./cmd/call-server

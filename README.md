@@ -30,7 +30,8 @@ nex_call/
    ./cert-renew.sh         # 先放自签名占位证书，启动 Caddy，再通过 HTTP-01 签发 Let's Encrypt IP 证书
    docker compose up -d --build
    ```
-   签不到 IP 证书时执行 `./cert-renew.sh --self-signed` 兜底（浏览器首次访问需手动信任）。
+   `ACME_EMAIL` 必须是真实邮箱，不能用 `example.com`。签不到 IP 证书时执行 `./cert-renew.sh --self-signed` 兜底（浏览器首次访问需手动信任）。
+   80/443 必须空闲给 Caddy：本机已有宝塔 Nginx 时见「六、服务端部署排错」。
 6. 证书约 6 天有效，加定时续期：
    ```bash
    echo '17 */12 * * * /opt/nex_call/deploy/cert-renew.sh >> /var/log/nexcall-cert.log 2>&1' | crontab -
@@ -124,3 +125,47 @@ device-agent 每 10 秒打印一次 `call stats`：收发包数、丢包、FEC �
 - 能登录但通话无声：检查安全组是否放通 UDP 7882 / TCP 7881，以及 LiveKit 日志里的 `nodeIP` 是否为公网 IP。
 - 设备一直重连并提示 `unauthorized`：`DEVICE_SECRET` 不对，重新执行 `call-server device add` 生成新密钥。
 - 自签名证书兜底时：把服务器的 `deploy/certs/fullchain.pem` 拷到香橙派，在 `device.env` 里设置 `CA_CERT`。
+
+## 六、服务端部署排错
+
+腾讯云 VPS（含宝塔）首次部署时踩过的问题。`server/Dockerfile` 的 `GOPROXY`、`cert-renew.sh` 的 `/.lego` 和 `--disable-cn` 已写进仓库，按当前脚本部署即可。
+
+### 宝塔 Nginx 占用 80/443
+
+Caddy 必须独占 TCP 80（HTTP-01）和 443（HTTPS）。宝塔的 Nginx 路径是 `/www/server/nginx/`，**不是** systemd 服务，所以 `systemctl stop nginx` 不会停掉它：
+
+```bash
+ss -lntup | grep -E ':80|:443'
+ps -ef | grep '[n]ginx'
+# master 若为 /www/server/nginx/sbin/nginx，用宝塔自己的方式停：
+/etc/init.d/nginx stop
+# 或 /www/server/nginx/sbin/nginx -s stop
+# 并在宝塔面板里停止 Nginx，防止开机再拉起
+```
+
+这台机上还有别的网站时不要抢端口，应改成 Nginx 反代，或换一台只跑 NexCall 的机器。停干净后应看到 `docker-proxy` 在听 80/443，而不是 `nginx`。
+
+### `./cert-renew.sh` 卡在构建 call-server
+
+脚本为了起 Caddy 会 `docker compose up -d caddy`，Caddy 依赖 call-server，于是先编镜像。国内 VPS 访问 `proxy.golang.org` 经常极慢或一直挂起，日志停在 `RUN go mod download` 十几分钟，网卡 `rxkB/s` 只有约 1KB。Ctrl+C 后确认 `server/Dockerfile` 里有 `ENV GOPROXY=https://goproxy.cn,direct`，再 `docker compose build call-server`。BuildKit 构建时 `docker ps -a` 可能是空的，这是正常的。
+
+### lego 报 `mount ... /lego: not a directory`
+
+`goacme/lego` 镜像里 `/lego` 是入口二进制，不是目录。数据目录必须挂到 `/.lego`，并用 `--path /.lego`。可自检：
+
+```bash
+docker run --rm --entrypoint ls goacme/lego:v4.28.1 -l /lego
+# 应看到一个约 64MB 的可执行文件
+```
+
+### `contact email has forbidden domain "example.com"`
+
+Let's Encrypt 拒收 `example.com` 邮箱。改 `deploy/.env` 里的 `ACME_EMAIL` 为真实邮箱后再跑脚本。`.env.example` 里的地址只是占位。
+
+### `CSR contains IP address in Common Name`
+
+HTTP-01 已经通过、卡在 finalize：Let's Encrypt 不允许把 IP 写进 CSR 的 CN，IP 只能在 SAN。`lego run/renew` 必须带 `--disable-cn`（v4.25+）。
+
+### `.env` 各项用途
+
+签发证书真正用到的是 `PUBLIC_IP`（证书 SAN / Caddy 站点名 / LiveKit `--node-ip`）和 `ACME_EMAIL`。`LIVEKIT_API_KEY`、`LIVEKIT_API_SECRET`、`SESSION_SECRET` 给 `docker compose` 用，和 ACME 无关，但写在同一份 `.env` 里，部署时一起填。
