@@ -48,8 +48,7 @@ install_opus_if_old() {
   local ver=1.3.1 url ok=0
   echo "==> 系统 libopus 过旧，编译安装 ${ver}"
   for url in \
-    "https://downloads.xiph.org/releases/opus/opus-${ver}.tar.gz" \
-    "https://github.com/xiph/opus/releases/download/v${ver}/opus-${ver}.tar.gz"
+    "https://github.com/xiph/opus/archive/refs/tags/v${ver}.tar.gz"
   do
     if curl -fL --retry 2 --connect-timeout 15 --max-time 120 -o /tmp/opus.tar.gz "$url"; then
       ok=1
@@ -60,8 +59,10 @@ install_opus_if_old() {
   rm -rf /tmp/opus-src
   mkdir -p /tmp/opus-src
   tar -C /tmp/opus-src --strip-components=1 -xzf /tmp/opus.tar.gz
+  sudo apt-get install -y autoconf automake libtool
   (
     cd /tmp/opus-src
+    ./autogen.sh
     ./configure --disable-shared --enable-static --prefix=/usr/local --disable-doc
     make -j"$(nproc)"
     sudo make install
