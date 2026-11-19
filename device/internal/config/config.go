@@ -20,6 +20,8 @@ type Config struct {
 
 	// CallTarget 短按提醒的 Web 用户名，空表示提醒所有在线用户
 	CallTarget string
+	// CallStateFile 写出 offline / idle / active，供音乐播放器等本机程序读取；空表示不写
+	CallStateFile string
 
 	AudioBackend   string
 	CaptureDevice  string
@@ -100,6 +102,8 @@ func Load(args []string) (*Config, error) {
 	fs.StringVar(&c.CACert, "ca-cert", env("CA_CERT", ""), "固定信任的服务端证书（自签名时使用）[CA_CERT]")
 
 	fs.StringVar(&c.CallTarget, "call-target", env("CALL_TARGET", ""), "短按提醒的 Web 用户，空为全部在线用户 [CALL_TARGET]")
+
+	fs.StringVar(&c.CallStateFile, "call-state-file", env("CALL_STATE_FILE", "/run/nexcall/call-state"), "通话状态文件，空为不写 [CALL_STATE_FILE]")
 
 	fs.StringVar(&c.AudioBackend, "audio-backend", env("AUDIO_BACKEND", "auto"), "auto|pulseaudio|alsa|null [AUDIO_BACKEND]")
 	fs.StringVar(&c.CaptureDevice, "capture-device", env("CAPTURE_DEVICE", ""), "采集设备名子串，空为默认 [CAPTURE_DEVICE]")
