@@ -198,25 +198,40 @@ setup_pulse() {
   usb_src=$(pactl list short sources | awk '/usb/ && !/monitor/ {print $2; exit}')
   if [[ -n "$usb_sink" && -n "$usb_src" ]]; then
     echo "==> 将回声消除绑到 USB 声卡：$usb_sink"
+    # 麦克风常是立体声、喇叭是单声道。声道数不一致时回声消除对不齐，网页会听到自己的声音。
     pactl unload-module module-echo-cancel >/dev/null 2>&1 || true
+    pactl unload-module module-remap-source >/dev/null 2>&1 || true
+    pactl load-module module-remap-source source_name=usb-mic-mono master="$usb_src" \
+      channels=1 channel_map=mono remix=yes rate=16000
     pactl load-module module-echo-cancel aec_method=webrtc use_master_format=1 \
-      sink_master="$usb_sink" source_master="$usb_src" \
-      sink_name=echo-cancel-sink source_name=echo-cancel-source
+      sink_master="$usb_sink" source_master=usb-mic-mono \
+      sink_name=echo-cancel-sink source_name=echo-cancel-source \
+      aec_args="high_pass_filter=1 noise_suppression=1 analog_gain_control=0 digital_gain_control=1 extended_filter=1"
+    # USB 小麦克风硬件拉满仍偏小，再加约 10 dB 软件增益
+    pactl set-source-volume usb-mic-mono 150%
     python3 - "$usb_sink" "$usb_src" << 'PY'
 import pathlib, sys
 sink, src = sys.argv[1], sys.argv[2]
 path = pathlib.Path.home() / ".config/pulse/default.pa"
-text = path.read_text()
-needle = "load-module module-echo-cancel"
+text = path.read_text().splitlines()
+remap = (
+    "load-module module-remap-source source_name=usb-mic-mono "
+    f"master={src} channels=1 channel_map=mono remix=yes rate=16000"
+)
 line = (
     "load-module module-echo-cancel use_master_format=1 aec_method=webrtc "
+    'aec_args="high_pass_filter=1 noise_suppression=1 analog_gain_control=0 digital_gain_control=1 extended_filter=1" '
     "source_name=echo-cancel-source sink_name=echo-cancel-sink "
-    f"sink_master={sink} source_master={src}"
+    f"sink_master={sink} source_master=usb-mic-mono"
 )
 out = []
-for raw in text.splitlines():
-    if raw.startswith(needle):
+for raw in text:
+    if raw.startswith("load-module module-remap-source") or raw.startswith("set-source-volume usb-mic-mono"):
+        continue
+    if raw.startswith("load-module module-echo-cancel"):
+        out.append(remap)
         out.append(line)
+        out.append("set-source-volume usb-mic-mono 98304")
     else:
         out.append(raw)
 path.write_text("\n".join(out) + "\n")

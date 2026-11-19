@@ -7,7 +7,9 @@
 .include /etc/pulse/default.pa
 
 .ifexists module-echo-cancel.so
-load-module module-echo-cancel use_master_format=1 aec_method=webrtc source_name=echo-cancel-source sink_name=echo-cancel-sink
+# setup.sh 发现 USB 声卡后会把麦克风混成单声道，再写上 sink_master / source_master。
+# 声道数必须和喇叭一致，否则回声消除对不齐。
+load-module module-echo-cancel use_master_format=1 aec_method=webrtc aec_args="high_pass_filter=1 noise_suppression=1 analog_gain_control=0 digital_gain_control=1 extended_filter=1" source_name=echo-cancel-source sink_name=echo-cancel-sink
 set-default-source echo-cancel-source
 set-default-sink echo-cancel-sink
 .endif

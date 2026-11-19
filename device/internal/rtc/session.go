@@ -23,6 +23,8 @@ type Options struct {
 	Encoder        codec.EncoderConfig
 	JitterTargetMs int
 	JitterMaxMs    int
+	// PlaybackGain 对收到的通话声音做软件放大，1 为原样播放
+	PlaybackGain float64
 	// TestTone 用 440Hz 正弦波代替麦克风，便于在没有麦克风时验证链路
 	TestTone      bool
 	StatsInterval time.Duration
@@ -285,6 +287,7 @@ func (s *Session) pull(out []int16) {
 		p.Pull(bufs[i])
 	}
 	playout.Mix(out, bufs)
+	playout.ApplyGain(out, s.opts.PlaybackGain)
 }
 
 func (s *Session) statsLoop() {

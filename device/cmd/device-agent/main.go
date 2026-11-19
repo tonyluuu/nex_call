@@ -63,6 +63,7 @@ func sessionOptions(cfg *config.Config) rtc.Options {
 		},
 		JitterTargetMs: cfg.JitterTargetMs,
 		JitterMaxMs:    cfg.JitterMaxMs,
+		PlaybackGain:   cfg.PlaybackGain,
 		TestTone:       cfg.TestTone,
 		StatsInterval:  cfg.StatsInterval,
 	}

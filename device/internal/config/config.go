@@ -30,6 +30,7 @@ type Config struct {
 	DTX            bool
 	JitterTargetMs int
 	JitterMaxMs    int
+	PlaybackGain   float64
 	StatsInterval  time.Duration
 
 	GPIOChip    string
@@ -71,6 +72,15 @@ func envBool(key string, def bool) bool {
 	return def
 }
 
+func envFloat(key string, def float64) float64 {
+	if v, ok := os.LookupEnv(key); ok {
+		if f, err := strconv.ParseFloat(strings.TrimSpace(v), 64); err == nil {
+			return f
+		}
+	}
+	return def
+}
+
 func envDuration(key string, def time.Duration) time.Duration {
 	if v, ok := os.LookupEnv(key); ok {
 		if d, err := time.ParseDuration(strings.TrimSpace(v)); err == nil {
@@ -100,6 +110,7 @@ func Load(args []string) (*Config, error) {
 	fs.BoolVar(&c.DTX, "dtx", envBool("OPUS_DTX", true), "静音不发包 [OPUS_DTX]")
 	fs.IntVar(&c.JitterTargetMs, "jitter-target-ms", envInt("JITTER_TARGET_MS", 60), "抖动缓冲起播深度 [JITTER_TARGET_MS]")
 	fs.IntVar(&c.JitterMaxMs, "jitter-max-ms", envInt("JITTER_MAX_MS", 300), "抖动缓冲上限 [JITTER_MAX_MS]")
+	fs.Float64Var(&c.PlaybackGain, "playback-gain", envFloat("PLAYBACK_GAIN", 1), "通话播放增益倍数，1 为原样，2 约 +6dB [PLAYBACK_GAIN]")
 	fs.DurationVar(&c.StatsInterval, "stats-interval", envDuration("STATS_INTERVAL", 10*time.Second), "通话统计日志间隔 [STATS_INTERVAL]")
 
 	fs.StringVar(&c.GPIOChip, "gpio-chip", env("GPIO_CHIP", "gpiochip0"), "GPIO 控制器 [GPIO_CHIP]")
@@ -116,6 +127,9 @@ func Load(args []string) (*Config, error) {
 
 	if err := fs.Parse(args); err != nil {
 		return nil, err
+	}
+	if c.PlaybackGain <= 0 || c.PlaybackGain > 8 {
+		return nil, fmt.Errorf("PLAYBACK_GAIN 需在 0 到 8 之间，当前 %v", c.PlaybackGain)
 	}
 
 	if c.Token != "" {
