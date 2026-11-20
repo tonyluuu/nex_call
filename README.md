@@ -52,7 +52,7 @@ nex_call/
 首次部署仍按上面 1–8 步完成：VPS 上要先有 Docker、`/opt/nex_call/deploy/.env` 和证书，SSH 用户要能写 `/opt/nex_call` 并执行 `docker`。之后三条工作流按改动的目录分别运行，也可以在 Actions 页手动运行其中一条：
 
 - `web`：`web/` 有变更时构建网页，只同步 `web/dist`。Caddy 直接读这个目录，不重编镜像、不重启容器。
-- `server`：`server/` 或 `deploy/`（不含 `deploy/device/`）有变更时构建 `nex-call-call-server:latest`，同步 `server/` 和 `deploy/`（排除 `.env`、`certs/`、`acme/`、`lego/`），再 `docker compose up -d --no-build`。
+- `server`：`server/` 或 `deploy/`（不含 `deploy/device/`）有变更时，把源码同步到 VPS（排除 `.env`、`certs/`、`acme/`、`lego/`），再在 VPS 上 `docker compose up -d --build`。镜像层缓存在 VPS 本地，依赖没变时只重编 Go 代码。
 - `device`：见第二节。只打包二进制，不连接 VPS。
 
 `web` 和 `server` 同时触发时会排队，避免两次部署一起写 VPS。两条都不修改 `.env`、证书、SQLite 数据卷，也不改安全组或续期 crontab。

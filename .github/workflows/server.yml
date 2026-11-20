@@ -20,9 +20,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 构建 call-server 镜像
-        run: docker build -t nex-call-call-server:latest -f server/Dockerfile server
-
       - name: 配置 SSH
         env:
           VPS_SSH_KEY: ${{ secrets.VPS_SSH_KEY }}
@@ -56,7 +53,7 @@ jobs:
             --exclude '.env' --exclude 'certs/' --exclude 'acme/' --exclude 'lego/' \
             deploy/ "$target:/opt/nex_call/deploy/"
 
-      - name: 载入镜像并启动
+      - name: 在 VPS 上构建并启动
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_USER: ${{ secrets.VPS_USER }}
@@ -64,6 +61,6 @@ jobs:
           set -euo pipefail
           ssh_cmd=(ssh -i "$HOME/.ssh/deploy_key" -p "$VPS_PORT" -o IdentitiesOnly=yes)
           target="$VPS_USER@$VPS_HOST"
-          docker save nex-call-call-server:latest | gzip \
-            | "${ssh_cmd[@]}" "$target" "bash -lc 'set -o pipefail; gunzip | docker load'"
-          "${ssh_cmd[@]}" "$target" 'cd /opt/nex_call/deploy && docker compose up -d --no-build'
+          # 源码已经同步过去。在 VPS 上构建可复用本地镜像层，只重编有改动的 Go 代码，
+          # 不必再把整份镜像经 SSH 传一遍。go.mod 未变时依赖层直接命中缓存。
+          "${ssh_cmd[@]}" "$target" 'cd /opt/nex_call/deploy && docker compose --progress plain up -d --build'
