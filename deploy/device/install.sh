@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # 在香橙派上安装 / 升级 device-agent 并注册为 systemd 服务。
-# 用法：./install.sh <device-agent 可执行文件路径>
+# 用法：./install.sh [device-agent 可执行文件路径]
+# 不给路径时使用脚本同目录下的 device-agent。
 set -euo pipefail
 
-BIN=${1:-./device-agent}
 HERE=$(cd "$(dirname "$0")" && pwd)
+BIN=${1:-$HERE/device-agent}
 RUN_USER=${SUDO_USER:-$(id -un)}
 RUN_UID=$(id -u "$RUN_USER")
 

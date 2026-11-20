@@ -257,6 +257,201 @@ func TestAdminKickAndCallVisibility(t *testing.T) {
 	}
 }
 
+func authed(t *testing.T, method, url, token, body string) *http.Response {
+	t.Helper()
+	req, err := http.NewRequest(method, url, strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if body != "" {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+func TestLoginReplacesPreviousSession(t *testing.T) {
+	ts, _, _ := setup(t)
+	_, token1 := login(t, ts.URL, "alice", "password123")
+	ctx := context.Background()
+	wsBase := "ws" + strings.TrimPrefix(ts.URL, "http")
+	web, _, err := websocket.Dial(ctx, wsBase+"/ws/web?token="+token1, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer web.CloseNow()
+	read(t, web, signal.TypeRegistered)
+
+	_, token2 := login(t, ts.URL, "alice", "password123")
+	if token2 == "" || token2 == token1 {
+		t.Fatal("expected a new token")
+	}
+	if m := read(t, web, signal.TypeSessionEnded); m.Reason != signal.ReasonReplaced {
+		t.Fatalf("session ended %+v", m)
+	}
+
+	resp := authed(t, http.MethodGet, ts.URL+"/api/me", token1, "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("old token status %d", resp.StatusCode)
+	}
+	resp = authed(t, http.MethodGet, ts.URL+"/api/me", token2, "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("new token status %d", resp.StatusCode)
+	}
+}
+
+func TestAdminUsersAndVolume(t *testing.T) {
+	ts, st, secret := setup(t)
+	ctx := context.Background()
+	hash, _ := auth.HashPassword("password123")
+	if err := st.UpsertUser(ctx, "root", hash); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetRole(ctx, "root", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	_, alice := login(t, ts.URL, "alice", "password123")
+	_, root := login(t, ts.URL, "root", "password123")
+
+	resp := authed(t, http.MethodPost, ts.URL+"/api/admin/users", alice, `{"username":"cara","password":"password123"}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("user create status %d", resp.StatusCode)
+	}
+
+	resp = authed(t, http.MethodPost, ts.URL+"/api/admin/users", root, `{"username":"cara","password":"short"}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("short password status %d", resp.StatusCode)
+	}
+	resp = authed(t, http.MethodPost, ts.URL+"/api/admin/users", root, `{"username":"bad name","password":"password123"}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("bad username status %d", resp.StatusCode)
+	}
+
+	resp = authed(t, http.MethodPost, ts.URL+"/api/admin/users", root, `{"username":"cara","password":"password123"}`)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create status %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+	resp = authed(t, http.MethodPost, ts.URL+"/api/admin/users", root, `{"username":"cara","password":"password123"}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("duplicate status %d", resp.StatusCode)
+	}
+
+	resp = authed(t, http.MethodGet, ts.URL+"/api/admin/users", root, "")
+	var users []struct {
+		Username string `json:"username"`
+		Role     string `json:"role"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&users); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	found := false
+	for _, u := range users {
+		if u.Username == "cara" && u.Role == "user" {
+			found = true
+		}
+		if strings.Contains(u.Username, "hash") {
+			t.Fatal("password hash leaked")
+		}
+	}
+	if !found {
+		t.Fatalf("users %+v", users)
+	}
+
+	_, cara := login(t, ts.URL, "cara", "password123")
+	wsBase := "ws" + strings.TrimPrefix(ts.URL, "http")
+	caraWS, _, err := websocket.Dial(ctx, wsBase+"/ws/web?token="+cara, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer caraWS.CloseNow()
+	read(t, caraWS, signal.TypeRegistered)
+
+	resp = authed(t, http.MethodDelete, ts.URL+"/api/admin/users/root", root, "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("delete self status %d", resp.StatusCode)
+	}
+	resp = authed(t, http.MethodDelete, ts.URL+"/api/admin/users/root", alice, "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("delete admin by user status %d", resp.StatusCode)
+	}
+	if err := st.UpsertUser(ctx, "boss", hash); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetRole(ctx, "boss", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	resp = authed(t, http.MethodDelete, ts.URL+"/api/admin/users/boss", root, "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("delete other admin status %d", resp.StatusCode)
+	}
+
+	resp = authed(t, http.MethodDelete, ts.URL+"/api/admin/users/cara", root, "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("delete status %d", resp.StatusCode)
+	}
+	if m := read(t, caraWS, signal.TypeSessionEnded); m.Reason != signal.ReasonDeleted {
+		t.Fatalf("deleted session %+v", m)
+	}
+	resp = authed(t, http.MethodGet, ts.URL+"/api/me", cara, "")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("deleted token status %d", resp.StatusCode)
+	}
+
+	resp = authed(t, http.MethodPost, ts.URL+"/api/admin/devices/pi1/volume", root, `{"speaker":250}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("volume range status %d", resp.StatusCode)
+	}
+	resp = authed(t, http.MethodPost, ts.URL+"/api/admin/devices/pi1/volume", root, `{"speaker":80}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("offline volume status %d", resp.StatusCode)
+	}
+
+	dev, _, err := websocket.Dial(ctx, wsBase+"/ws/device", &websocket.DialOptions{
+		HTTPHeader: http.Header{"Authorization": {"Bearer pi1:" + secret}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer dev.CloseNow()
+	read(t, dev, signal.TypeRegistered)
+	read(t, dev, signal.TypeJoined)
+	resp = authed(t, http.MethodPost, ts.URL+"/api/admin/devices/pi1/volume", root, `{"speaker":0,"mic":200}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("volume status %d", resp.StatusCode)
+	}
+	m := read(t, dev, signal.TypeSetVolume)
+	if m.Speaker == nil || m.Mic == nil || *m.Speaker != 0 || *m.Mic != 200 {
+		t.Fatalf("set_volume %+v", m)
+	}
+	resp = authed(t, http.MethodPost, ts.URL+"/api/admin/devices/pi1/volume", alice, `{"speaker":50}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("user volume status %d", resp.StatusCode)
+	}
+}
+
 func TestUnauthorized(t *testing.T) {
 	ts, _, _ := setup(t)
 	resp, err := http.Get(ts.URL + "/api/devices")

@@ -6,7 +6,11 @@ set -euo pipefail
 
 RUN_USER=$(id -un)
 HERE=$(cd "$(dirname "$0")" && pwd)
-GO_VERSION=${GO_VERSION:-$(awk '/^go / {print $2; exit}' "$HERE/../../device/go.mod")}
+# 部署包里没有源码树。只有旁边还能找到 go.mod 时才从里面读版本。
+GO_VERSION=${GO_VERSION:-}
+if [[ -z "$GO_VERSION" && -f "$HERE/../../device/go.mod" ]]; then
+  GO_VERSION=$(awk '/^go / {print $2; exit}' "$HERE/../../device/go.mod")
+fi
 GO_VERSION=${GO_VERSION:-1.26.8}
 
 if [[ "$(uname -m)" != "aarch64" ]]; then
@@ -207,8 +211,11 @@ setup_pulse() {
       sink_master="$usb_sink" source_master=usb-mic-mono \
       sink_name=echo-cancel-sink source_name=echo-cancel-source \
       'aec_args="high_pass_filter=1 noise_suppression=1 analog_gain_control=0 digital_gain_control=1 extended_filter=1"'
-    # USB 小麦克风硬件拉满仍偏小，再加约 10 dB 软件增益
-    pactl set-source-volume usb-mic-mono 150%
+    # 开机把 USB 麦克风固定到 150%（98304 = 150% × 65536）。100% 以内是硬件音量，
+    # 超出部分是软件增益。写绝对音量，避免按当前音量再乘一次。
+    # 这行在 default.pa 末尾，晚于 device-restore，所以每次开机都回到 150%。
+    # 开机之后管理员仍可在网页上改；那个改动保留到下次重启。
+    pactl set-source-volume "$usb_src" 98304
     python3 - "$usb_sink" "$usb_src" << 'PY'
 import pathlib, sys
 sink, src = sys.argv[1], sys.argv[2]
@@ -224,14 +231,19 @@ line = (
     "source_name=echo-cancel-source sink_name=echo-cancel-sink "
     f"sink_master={sink} source_master=usb-mic-mono"
 )
+volume = f"set-source-volume {src} 98304"
 out = []
 for raw in text:
-    if raw.startswith("load-module module-remap-source") or raw.startswith("set-source-volume usb-mic-mono"):
+    if (
+        raw.startswith("load-module module-remap-source")
+        or raw.startswith("set-source-volume usb-mic-mono")
+        or raw.startswith(f"set-source-volume {src} ")
+    ):
         continue
     if raw.startswith("load-module module-echo-cancel"):
         out.append(remap)
         out.append(line)
-        out.append("set-source-volume usb-mic-mono 98304")
+        out.append(volume)
     else:
         out.append(raw)
 path.write_text("\n".join(out) + "\n")
@@ -262,5 +274,9 @@ echo
 echo "完成。下一步："
 echo "  1. 重新登录一次，让 gpio 组和用户会话生效"
 echo "  2. 运行 ./audio-test.sh 检查采集、播放和回声消除"
-echo "  3. 参考 README 编译并安装 device-agent"
-echo "     当前 shell 可先执行：export PATH=\$PATH:/usr/local/go/bin"
+if [[ -x "$HERE/device-agent" ]]; then
+  echo "  3. 运行 ./install.sh 安装同目录的 device-agent"
+else
+  echo "  3. 参考 README 编译并安装 device-agent"
+  echo "     当前 shell 可先执行：export PATH=\$PATH:/usr/local/go/bin"
+fi

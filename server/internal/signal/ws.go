@@ -58,6 +58,22 @@ func (h *Hub) Serve(w http.ResponseWriter, r *http.Request, p *Peer, originPatte
 	}
 }
 
+func drainOutbox(ctx context.Context, conn *websocket.Conn, p *Peer) {
+	for {
+		select {
+		case m := <-p.Outbox():
+			wctx, cancel := context.WithTimeout(ctx, writeTimeout)
+			err := wsjson.Write(wctx, conn, m)
+			cancel()
+			if err != nil {
+				return
+			}
+		default:
+			return
+		}
+	}
+}
+
 func (h *Hub) writeLoop(ctx context.Context, conn *websocket.Conn, p *Peer, cancel context.CancelFunc) {
 	defer cancel()
 	ping := time.NewTicker(pingInterval)
@@ -67,6 +83,8 @@ func (h *Hub) writeLoop(ctx context.Context, conn *websocket.Conn, p *Peer, canc
 		case <-ctx.Done():
 			return
 		case <-p.Done():
+			// 先把已经排队的消息（例如 session_ended）发出去，再关掉连接。
+			drainOutbox(ctx, conn, p)
 			conn.Close(websocket.StatusPolicyViolation, "replaced")
 			return
 		case m := <-p.Outbox():

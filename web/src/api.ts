@@ -11,6 +11,14 @@ export interface DeviceStatus {
   online: boolean
   busy: boolean
   lastSeen?: string
+  speaker?: number
+  mic?: number
+}
+
+export interface UserAccount {
+  username: string
+  role: string
+  createdAt: string
 }
 
 export interface UserStatus {
@@ -109,5 +117,29 @@ export function kick(token: string, room: string, identity: string) {
   return request<{ ok: string }>('/api/admin/kick', {
     method: 'POST',
     body: JSON.stringify({ room, identity }),
+  }, token)
+}
+
+export function listUsers(token: string) {
+  return request<UserAccount[]>('/api/admin/users', {}, token)
+}
+
+export function createUser(token: string, username: string, password: string) {
+  return request<UserAccount>('/api/admin/users', {
+    method: 'POST',
+    body: JSON.stringify({ username, password }),
+  }, token)
+}
+
+export function deleteUser(token: string, username: string) {
+  return request<{ ok: string }>(`/api/admin/users/${encodeURIComponent(username)}`, {
+    method: 'DELETE',
+  }, token)
+}
+
+export function setDeviceVolume(token: string, id: string, body: { speaker?: number; mic?: number }) {
+  return request<{ ok: string }>(`/api/admin/devices/${encodeURIComponent(id)}/volume`, {
+    method: 'POST',
+    body: JSON.stringify(body),
   }, token)
 }

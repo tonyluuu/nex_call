@@ -1,18 +1,23 @@
 import './style.css'
 import {
+  createUser,
+  deleteUser,
   getCall,
   kick,
   listCalls,
+  listUsers,
   loadSession,
   login,
   me,
   saveSession,
+  setDeviceVolume,
   UnauthorizedError,
   type CallRecord,
   type DeviceStatus,
   type MemberStatus,
   type RoomStatus,
   type Session,
+  type UserAccount,
   type UserStatus,
 } from './api'
 import { MediaCall } from './call'
@@ -38,6 +43,18 @@ const reasonText: Record<string, string> = {
   kicked: '已被管理员移出',
   peer_left: '对方已离开，通话结束',
   timeout: '无人加入，通话已结束',
+  replaced: '账号已在其他地方登录',
+  deleted: '账号已被删除',
+}
+
+const apiErrorText: Record<string, string> = {
+  'user exists': '用户名已存在',
+  'invalid username': '用户名不能为空，且不能包含空格或冒号',
+  'password must be at least 8 characters': '密码至少 8 位',
+  'cannot delete yourself': '不能删除当前登录的账号',
+  'cannot delete admin': '不能删除管理员',
+  'device offline': '设备不在线',
+  'bad request': '参数不正确',
 }
 
 let session: Session | null = null
@@ -49,7 +66,16 @@ let current: CurrentCall | null = null
 let speaking = new Set<string>()
 let notifyRoom = ''
 let timerHandle: number | undefined
+let volumeFor = ''
+let volumeBusyUntil = 0
+let volumeTimer: number | undefined
+let volumePending: { speaker?: number; mic?: number } = {}
 const ringer = new Ringer()
+
+function explain(e: unknown) {
+  const msg = e instanceof Error ? e.message : '操作失败'
+  return apiErrorText[msg] ?? msg
+}
 
 function show(id: 'login-view' | 'main-view') {
   $('login-view').classList.toggle('hidden', id !== 'login-view')
@@ -90,6 +116,166 @@ function setConn(connected: boolean) {
 function memberLine(members: MemberStatus[]) {
   if (!members?.length) return '空房间'
   return members.map((m) => peerLabel(m.address)).join('、')
+}
+
+function fmtVol(v?: number) {
+  return v == null ? '—' : `${v}%`
+}
+
+function snap5(v: number) {
+  return Math.max(0, Math.min(200, Math.round(v / 5) * 5))
+}
+
+function volumeText(v: number) {
+  return v > 100 ? `${v}% · 软件增益` : `${v}%`
+}
+
+function renderAdminDevices() {
+  const list = $('admin-devices')
+  list.replaceChildren()
+  if (devices.length === 0) {
+    const li = document.createElement('li')
+    li.className = 'empty muted'
+    li.textContent = '还没有登记设备'
+    list.append(li)
+    return
+  }
+  for (const d of devices) {
+    const li = document.createElement('li')
+    li.className = 'device'
+    const state = !d.online ? '离线' : d.busy ? '通话中' : '在房间待命'
+    li.innerHTML = `
+      <div class="device-info">
+        <span class="dot ${d.online ? (d.busy ? 'busy' : 'on') : ''}"></span>
+        <div><div class="device-name"></div><div class="muted small"></div></div>
+      </div>`
+    li.querySelector('.device-name')!.textContent = d.name
+    li.querySelector('.small')!.textContent = `${d.id} · ${state} · 喇叭 ${fmtVol(d.speaker)} · 麦克风 ${fmtVol(d.mic)}`
+    const btn = document.createElement('button')
+    btn.textContent = '设置'
+    btn.disabled = !d.online
+    btn.onclick = () => openVolume(d.id)
+    li.append(btn)
+    list.append(li)
+  }
+}
+
+function setSlider(id: string, textId: string, value?: number) {
+  const input = $<HTMLInputElement>(id)
+  const known = value != null
+  input.disabled = !known
+  if (!known) {
+    $(textId).textContent = '—'
+    return
+  }
+  const v = snap5(value)
+  input.value = String(v)
+  $(textId).textContent = volumeText(v)
+}
+
+function openVolume(id: string) {
+  const d = devices.find((x) => x.id === id)
+  if (!d?.online) return
+  volumeFor = id
+  volumePending = {}
+  volumeBusyUntil = 0
+  $('volume-title').textContent = d.name
+  setSlider('volume-speaker', 'volume-speaker-text', d.speaker)
+  setSlider('volume-mic', 'volume-mic-text', d.mic)
+  $('volume-dialog').classList.remove('hidden')
+}
+
+function closeVolume() {
+  volumeFor = ''
+  volumePending = {}
+  clearTimeout(volumeTimer)
+  $('volume-dialog').classList.add('hidden')
+}
+
+function syncVolumeDialog() {
+  if (!volumeFor) return
+  const d = devices.find((x) => x.id === volumeFor)
+  if (!d?.online) {
+    closeVolume()
+    banner('设备已离线')
+    return
+  }
+  $('volume-title').textContent = d.name
+  if (Date.now() < volumeBusyUntil) return
+  setSlider('volume-speaker', 'volume-speaker-text', d.speaker)
+  setSlider('volume-mic', 'volume-mic-text', d.mic)
+}
+
+function queueVolume(part: { speaker?: number; mic?: number }) {
+  volumeBusyUntil = Date.now() + 1500
+  volumePending = { ...volumePending, ...part }
+  if (volumeTimer != null) return
+  volumeTimer = window.setTimeout(() => void flushVolume(), 150)
+}
+
+async function flushVolume() {
+  volumeTimer = undefined
+  if (!session || !volumeFor) return
+  const body = volumePending
+  volumePending = {}
+  if (body.speaker == null && body.mic == null) return
+  try {
+    await setDeviceVolume(session.token, volumeFor, body)
+  } catch (e) {
+    if (e instanceof UnauthorizedError) logout()
+    else banner(explain(e))
+  }
+}
+
+function renderAccounts(accounts: UserAccount[]) {
+  const list = $('admin-users')
+  list.replaceChildren()
+  if (accounts.length === 0) {
+    const li = document.createElement('li')
+    li.className = 'empty muted'
+    li.textContent = '还没有用户'
+    list.append(li)
+    return
+  }
+  for (const u of accounts) {
+    const li = document.createElement('li')
+    li.className = 'device'
+    li.innerHTML = `
+      <div class="device-info">
+        <div><div class="device-name"></div><div class="muted small"></div></div>
+      </div>`
+    li.querySelector('.device-name')!.textContent = u.username
+    li.querySelector('.small')!.textContent = u.role === 'admin' ? '管理员' : '普通用户'
+    if (u.role !== 'admin' && u.username !== session?.username) {
+      const btn = document.createElement('button')
+      btn.textContent = '删除'
+      btn.onclick = () => void removeUser(u.username)
+      li.append(btn)
+    }
+    list.append(li)
+  }
+}
+
+async function refreshUsers() {
+  if (!session || !isAdmin()) return
+  try {
+    renderAccounts(await listUsers(session.token))
+  } catch (e) {
+    if (e instanceof UnauthorizedError) logout()
+    else banner(explain(e))
+  }
+}
+
+async function removeUser(username: string) {
+  if (!session) return
+  if (!window.confirm(`确认删除用户 ${username}？该用户会立即退出登录。`)) return
+  try {
+    await deleteUser(session.token, username)
+    await refreshUsers()
+  } catch (e) {
+    if (e instanceof UnauthorizedError) logout()
+    else $('user-error').textContent = explain(e)
+  }
 }
 
 function renderDevices() {
@@ -261,7 +447,11 @@ function renderCall() {
   renderDevices()
   renderUsers()
   renderRooms($('room-list'), false)
-  if (isAdmin()) renderRooms($('admin-rooms'), true)
+  if (isAdmin()) {
+    renderAdminDevices()
+    renderRooms($('admin-rooms'), true)
+    syncVolumeDialog()
+  }
   if (!current) return
   const room = rooms.find((r) => r.id === current!.room)
   const title = room ? roomLabel(room) : '正在进入…'
@@ -432,6 +622,10 @@ function onSignal(m: Message) {
     case 'kicked':
       if (current) void teardown('kicked')
       break
+    case 'session_ended':
+      logout()
+      banner(reasonText[m.reason ?? ''] ?? '登录已失效', true)
+      break
     case 'error':
       if (current?.phase === 'joining') void teardown()
       banner(reasonText[m.reason ?? ''] ?? m.reason ?? '出错了')
@@ -440,6 +634,7 @@ function onSignal(m: Message) {
 }
 
 function startSession(s: Session) {
+  banner('')
   session = s
   saveSession(s)
   $('user-name').textContent = s.role === 'admin' ? `${s.username} · 管理员` : s.username
@@ -461,11 +656,13 @@ function startSession(s: Session) {
 }
 
 function logout() {
+  const token = session?.token
   void teardown()
   signal?.stop()
   signal = null
   session = null
-  saveSession(null)
+  const saved = loadSession()
+  if (!saved || saved.token === token) saveSession(null)
   show('login-view')
 }
 
@@ -474,6 +671,7 @@ function showTab(admin: boolean) {
   $('admin-panel').classList.toggle('hidden', !admin)
   $('tab-call').classList.toggle('on', !admin)
   $('tab-admin').classList.toggle('on', admin)
+  if (admin) void refreshUsers()
 }
 
 $('login-form').addEventListener('submit', async (ev) => {
@@ -516,6 +714,40 @@ $('btn-audio').onclick = async () => {
   await current?.media?.startAudio()
   $('btn-audio').classList.add('hidden')
 }
+$('user-form').addEventListener('submit', async (ev) => {
+  ev.preventDefault()
+  if (!session) return
+  const form = ev.target as HTMLFormElement
+  const data = new FormData(form)
+  $('user-error').textContent = ''
+  try {
+    await createUser(session.token, String(data.get('username')), String(data.get('password')))
+    form.reset()
+    await refreshUsers()
+  } catch (e) {
+    if (e instanceof UnauthorizedError) logout()
+    else $('user-error').textContent = explain(e)
+  }
+})
+
+function bindVolume(inputId: string, textId: string, key: 'speaker' | 'mic') {
+  const input = $<HTMLInputElement>(inputId)
+  const preview = () => {
+    const v = Number(input.value)
+    $(textId).textContent = volumeText(v)
+    queueVolume({ [key]: v })
+  }
+  input.addEventListener('input', preview)
+  input.addEventListener('change', () => {
+    preview()
+    clearTimeout(volumeTimer)
+    void flushVolume()
+  })
+}
+bindVolume('volume-speaker', 'volume-speaker-text', 'speaker')
+bindVolume('volume-mic', 'volume-mic-text', 'mic')
+$('volume-close').onclick = closeVolume
+
 $('notify-join').onclick = () => {
   if (current) {
     banner('请先离开当前通话')

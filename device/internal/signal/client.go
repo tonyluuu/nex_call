@@ -21,16 +21,18 @@ import (
 
 // Message 与服务端 server/internal/signal.Message 保持一致。
 type Message struct {
-	Type   string `json:"type"`
-	CallID string `json:"callId,omitempty"`
-	Room   string `json:"room,omitempty"`
-	Token  string `json:"token,omitempty"`
-	URL    string `json:"url,omitempty"`
-	From   string `json:"from,omitempty"`
-	To     string `json:"to,omitempty"`
-	Peer   string `json:"peer,omitempty"`
-	Reason string `json:"reason,omitempty"`
-	Self   string `json:"self,omitempty"`
+	Type    string `json:"type"`
+	CallID  string `json:"callId,omitempty"`
+	Room    string `json:"room,omitempty"`
+	Token   string `json:"token,omitempty"`
+	URL     string `json:"url,omitempty"`
+	From    string `json:"from,omitempty"`
+	To      string `json:"to,omitempty"`
+	Peer    string `json:"peer,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+	Self    string `json:"self,omitempty"`
+	Speaker *int   `json:"speaker,omitempty"`
+	Mic     *int   `json:"mic,omitempty"`
 }
 
 type Config struct {

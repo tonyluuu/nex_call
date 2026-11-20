@@ -6,12 +6,16 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
 
-var ErrNotFound = errors.New("not found")
+var (
+	ErrNotFound = errors.New("not found")
+	ErrExists   = errors.New("already exists")
+)
 
 type Store struct {
 	db *sql.DB
@@ -21,6 +25,7 @@ type User struct {
 	Username     string
 	PasswordHash string
 	Role         string
+	SessionID    string
 	CreatedAt    time.Time
 }
 
@@ -107,6 +112,7 @@ func (s *Store) migrate(ctx context.Context) error {
 	}
 	defer rows.Close()
 	hasRole := false
+	hasSession := false
 	for rows.Next() {
 		var cid int
 		var name, ctype string
@@ -115,8 +121,11 @@ func (s *Store) migrate(ctx context.Context) error {
 		if err := rows.Scan(&cid, &name, &ctype, &notnull, &dflt, &pk); err != nil {
 			return err
 		}
-		if name == "role" {
+		switch name {
+		case "role":
 			hasRole = true
+		case "session_id":
+			hasSession = true
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -125,6 +134,11 @@ func (s *Store) migrate(ctx context.Context) error {
 	if !hasRole {
 		if _, err := s.db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN role TEXT NOT NULL DEFAULT 'user'`); err != nil {
 			return fmt.Errorf("migrate users.role: %w", err)
+		}
+	}
+	if !hasSession {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN session_id TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("migrate users.session_id: %w", err)
 		}
 	}
 	return nil
@@ -153,8 +167,8 @@ func (s *Store) UpsertUser(ctx context.Context, username, passwordHash string) e
 func (s *Store) GetUser(ctx context.Context, username string) (*User, error) {
 	var u User
 	var created int64
-	err := s.db.QueryRowContext(ctx, `SELECT username, password_hash, role, created_at FROM users WHERE username = ?`, username).
-		Scan(&u.Username, &u.PasswordHash, &u.Role, &created)
+	err := s.db.QueryRowContext(ctx, `SELECT username, password_hash, role, session_id, created_at FROM users WHERE username = ?`, username).
+		Scan(&u.Username, &u.PasswordHash, &u.Role, &u.SessionID, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -166,6 +180,35 @@ func (s *Store) GetUser(ctx context.Context, username string) (*User, error) {
 		u.Role = "user"
 	}
 	return &u, nil
+}
+
+func (s *Store) SetSession(ctx context.Context, username, sid string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE users SET session_id = ? WHERE username = ?`, sid, username)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// CreateUser 只插入新用户，用户名已存在时返回 ErrExists。
+func (s *Store) CreateUser(ctx context.Context, username, passwordHash, role string) error {
+	if role != "admin" && role != "user" {
+		return fmt.Errorf("invalid role %q", role)
+	}
+	_, err := s.db.ExecContext(ctx, `
+		INSERT INTO users(username, password_hash, role, created_at) VALUES(?, ?, ?, ?)`,
+		username, passwordHash, role, unix(time.Now()))
+	if err != nil {
+		if strings.Contains(err.Error(), "UNIQUE") {
+			return ErrExists
+		}
+		return err
+	}
+	return nil
 }
 
 func (s *Store) SetRole(ctx context.Context, username, role string) error {
@@ -184,12 +227,19 @@ func (s *Store) SetRole(ctx context.Context, username, role string) error {
 }
 
 func (s *Store) DeleteUser(ctx context.Context, username string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM users WHERE username = ?`, username)
-	return err
+	res, err := s.db.ExecContext(ctx, `DELETE FROM users WHERE username = ?`, username)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT username, password_hash, role, created_at FROM users ORDER BY username`)
+	rows, err := s.db.QueryContext(ctx, `SELECT username, password_hash, role, session_id, created_at FROM users ORDER BY username`)
 	if err != nil {
 		return nil, err
 	}
@@ -198,7 +248,7 @@ func (s *Store) ListUsers(ctx context.Context) ([]User, error) {
 	for rows.Next() {
 		var u User
 		var created int64
-		if err := rows.Scan(&u.Username, &u.PasswordHash, &u.Role, &created); err != nil {
+		if err := rows.Scan(&u.Username, &u.PasswordHash, &u.Role, &u.SessionID, &created); err != nil {
 			return nil, err
 		}
 		u.CreatedAt = time.UnixMilli(created)

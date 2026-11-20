@@ -34,6 +34,9 @@ type Config struct {
 	JitterMaxMs    int
 	PlaybackGain   float64
 	StatsInterval  time.Duration
+	// VolumeSink / VolumeSource 手动指定要调节的设备名（子串）。空则从默认设备沿 master 链找到硬件设备。
+	VolumeSink   string
+	VolumeSource string
 
 	GPIOChip    string
 	ButtonLine  int
@@ -116,6 +119,8 @@ func Load(args []string) (*Config, error) {
 	fs.IntVar(&c.JitterMaxMs, "jitter-max-ms", envInt("JITTER_MAX_MS", 300), "抖动缓冲上限 [JITTER_MAX_MS]")
 	fs.Float64Var(&c.PlaybackGain, "playback-gain", envFloat("PLAYBACK_GAIN", 1), "通话播放增益倍数，1 为原样，2 约 +6dB [PLAYBACK_GAIN]")
 	fs.DurationVar(&c.StatsInterval, "stats-interval", envDuration("STATS_INTERVAL", 10*time.Second), "通话统计日志间隔 [STATS_INTERVAL]")
+	fs.StringVar(&c.VolumeSink, "volume-sink", env("VOLUME_SINK", ""), "喇叭音量对应的 sink 名子串，空则自动找硬件设备 [VOLUME_SINK]")
+	fs.StringVar(&c.VolumeSource, "volume-source", env("VOLUME_SOURCE", ""), "麦克风音量对应的 source 名子串，空则自动找硬件设备 [VOLUME_SOURCE]")
 
 	fs.StringVar(&c.GPIOChip, "gpio-chip", env("GPIO_CHIP", "gpiochip0"), "GPIO 控制器 [GPIO_CHIP]")
 	fs.IntVar(&c.ButtonLine, "button-line", envInt("BUTTON_LINE", -1), "按键 GPIO 线号，-1 禁用 [BUTTON_LINE]")

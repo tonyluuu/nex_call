@@ -55,6 +55,18 @@
         </main>
 
         <main id="admin-panel" class="hidden">
+          <h2>设备设置</h2>
+          <ul id="admin-devices" class="devices"></ul>
+
+          <h2>用户管理</h2>
+          <form id="user-form" class="user-form">
+            <input name="username" placeholder="用户名" autocomplete="off" required />
+            <input name="password" type="password" placeholder="密码（至少 8 位）" autocomplete="new-password" required />
+            <button type="submit" class="primary">添加用户</button>
+            <p id="user-error" class="error"></p>
+          </form>
+          <ul id="admin-users" class="devices"></ul>
+
           <h2>房间</h2>
           <ul id="admin-rooms" class="devices"></ul>
           <h2>全部通话 <button id="refresh-admin-calls" class="link">刷新</button></h2>
@@ -78,6 +90,23 @@
             <button id="btn-hangup" class="round hangup" title="离开">离开</button>
           </div>
           <button id="btn-audio" class="link hidden">点击开启声音</button>
+        </div>
+      </div>
+      <div id="volume-dialog" class="overlay hidden">
+        <div class="call-card volume-card">
+          <div id="volume-title" class="call-peer"></div>
+          <label class="volume-row">喇叭
+            <input id="volume-speaker" type="range" min="0" max="200" step="5" value="100" />
+            <span id="volume-speaker-text">100%</span>
+          </label>
+          <div class="volume-scale"><span>0</span><span>100%</span><span>200%</span></div>
+          <label class="volume-row">麦克风
+            <input id="volume-mic" type="range" min="0" max="200" step="5" value="100" />
+            <span id="volume-mic-text">100%</span>
+          </label>
+          <div class="volume-scale"><span>0</span><span>100%</span><span>200%</span></div>
+          <p class="muted small">0–100% 是硬件音量，超过 100% 是软件增益。</p>
+          <button id="volume-close" class="link" type="button">关闭</button>
         </div>
       </div>
       <div id="call-mini" class="call-mini hidden">

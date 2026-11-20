@@ -3,23 +3,26 @@ package signal
 
 import "time"
 
-// 客户端发往服务端：join / call / leave / notify / kick / ping。
-// 服务端发往客户端：registered / presence / joined / invite / notify / left / kicked / error / pong。
+// 客户端发往服务端：join / call / leave / notify / kick / volume / ping。
+// 服务端发往客户端：registered / presence / joined / invite / notify / left / kicked / session_ended / set_volume / error / pong。
 const (
-	TypeJoin       = "join"
-	TypeCall       = "call"
-	TypeLeave      = "leave"
-	TypeNotify     = "notify"
-	TypeKick       = "kick"
-	TypePing       = "ping"
-	TypePong       = "pong"
-	TypeRegistered = "registered"
-	TypePresence   = "presence"
-	TypeJoined     = "joined"
-	TypeInvite     = "invite"
-	TypeLeft       = "left"
-	TypeKicked     = "kicked"
-	TypeError      = "error"
+	TypeJoin         = "join"
+	TypeCall         = "call"
+	TypeLeave        = "leave"
+	TypeNotify       = "notify"
+	TypeKick         = "kick"
+	TypeVolume       = "volume"
+	TypeSetVolume    = "set_volume"
+	TypePing         = "ping"
+	TypePong         = "pong"
+	TypeRegistered   = "registered"
+	TypePresence     = "presence"
+	TypeJoined       = "joined"
+	TypeInvite       = "invite"
+	TypeLeft         = "left"
+	TypeKicked       = "kicked"
+	TypeSessionEnded = "session_ended"
+	TypeError        = "error"
 )
 
 const (
@@ -30,6 +33,8 @@ const (
 	ReasonKicked       = "kicked"
 	ReasonPeerLeft     = "peer_left"
 	ReasonTimeout      = "timeout"
+	ReasonReplaced     = "replaced"
+	ReasonDeleted      = "deleted"
 	RoleAdmin          = "admin"
 	RoleUser           = "user"
 )
@@ -44,6 +49,8 @@ type Message struct {
 	Peer    string         `json:"peer,omitempty"`
 	Reason  string         `json:"reason,omitempty"`
 	Self    string         `json:"self,omitempty"`
+	Speaker *int           `json:"speaker,omitempty"`
+	Mic     *int           `json:"mic,omitempty"`
 	Devices []DeviceStatus `json:"devices,omitempty"`
 	Users   []UserStatus   `json:"users,omitempty"`
 	Rooms   []RoomStatus   `json:"rooms,omitempty"`
@@ -55,6 +62,9 @@ type DeviceStatus struct {
 	Online   bool       `json:"online"`
 	Busy     bool       `json:"busy"`
 	LastSeen *time.Time `json:"lastSeen,omitempty"`
+	// Speaker / Mic 是设备上报的系统音量百分比，0–100 为硬件音量，超过 100 为软件增益。
+	Speaker *int `json:"speaker,omitempty"`
+	Mic     *int `json:"mic,omitempty"`
 }
 
 type UserStatus struct {

@@ -15,7 +15,8 @@ const (
 	KindWeb    = "web"
 )
 
-// Peer 是一条信令连接。同一 Web 用户可以有多个 Peer（多个标签页）。
+// Peer 是一条信令连接。同一个登录会话可以有多个 Peer（多个标签页）；
+// 再次登录会使旧会话的连接全部失效。
 type Peer struct {
 	Kind string
 	ID   string
@@ -24,6 +25,10 @@ type Peer struct {
 	send chan Message
 	once sync.Once
 	done chan struct{}
+
+	// speaker / mic 是设备最近一次上报的系统音量。
+	speaker *int
+	mic     *int
 }
 
 func NewPeer(kind, id, name string) *Peer {
@@ -204,6 +209,8 @@ func (h *Hub) Handle(p *Peer, m Message) {
 		h.notify(p, m.To)
 	case TypeKick:
 		h.kick(p, m.Room, m.Peer)
+	case TypeVolume:
+		h.reportVolume(p, m)
 	default:
 		p.Send(Message{Type: TypeError, Reason: "unknown message type: " + m.Type})
 	}
@@ -381,6 +388,61 @@ func (h *Hub) notify(p *Peer, to string) {
 	}
 	for wp := range h.webPeers[id] {
 		wp.Send(msg)
+	}
+}
+
+func (h *Hub) reportVolume(p *Peer, m Message) {
+	if p.Kind != KindDevice {
+		p.Send(Message{Type: TypeError, Reason: "only devices report volume"})
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.devPeers[p.ID] != p {
+		return
+	}
+	if m.Speaker != nil {
+		v := *m.Speaker
+		p.speaker = &v
+	}
+	if m.Mic != nil {
+		v := *m.Mic
+		p.mic = &v
+	}
+	h.broadcastPresenceLocked()
+}
+
+// SetDeviceVolume 让在线设备把喇叭或麦克风调到指定百分比。设备不在线时返回错误。
+func (h *Hub) SetDeviceVolume(id string, speaker, mic *int) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	p := h.devPeers[id]
+	if p == nil {
+		return errString("device offline")
+	}
+	p.Send(Message{Type: TypeSetVolume, Speaker: speaker, Mic: mic})
+	return nil
+}
+
+// EndUserSessions 结束该 Web 用户的全部连接：先通知，再退出房间，最后关掉连接。
+func (h *Hub) EndUserSessions(id, reason string) {
+	h.mu.Lock()
+	var peers []*Peer
+	for p := range h.webPeers[id] {
+		peers = append(peers, p)
+	}
+	for _, p := range peers {
+		p.Send(Message{Type: TypeSessionEnded, Reason: reason})
+		if h.peerRoom[p] != "" {
+			h.leaveLocked(p, reason)
+		}
+	}
+	if len(peers) > 0 {
+		h.broadcastPresenceLocked()
+	}
+	h.mu.Unlock()
+	for _, p := range peers {
+		p.Close()
 	}
 }
 
@@ -644,6 +706,8 @@ func (h *Hub) presenceLocked() Message {
 			continue
 		}
 		list[i].Online = true
+		list[i].Speaker = dp.speaker
+		list[i].Mic = dp.mic
 		if r := h.rooms[h.peerRoom[dp]]; r != nil && h.webCount(r) > 0 {
 			list[i].Busy = true
 		}

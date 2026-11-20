@@ -424,3 +424,65 @@ func TestWaitingTimeout(t *testing.T) {
 		}
 	}
 }
+
+func TestEndUserSessionLeavesRoom(t *testing.T) {
+	h, rec := newTestHub()
+	dev := register(t, h, KindDevice, "pi1")
+	alice := register(t, h, KindWeb, "alice")
+	h.Handle(alice, Message{Type: TypeJoin, Room: "device:pi1"})
+	expect(t, alice, TypeJoined)
+
+	h.EndUserSessions("alice", ReasonReplaced)
+	if m := expect(t, alice, TypeSessionEnded); m.Reason != ReasonReplaced {
+		t.Fatalf("ended %+v", m)
+	}
+	if m := expect(t, alice, TypeLeft); m.Reason != ReasonReplaced {
+		t.Fatalf("left %+v", m)
+	}
+	select {
+	case <-alice.Done():
+	case <-time.After(time.Second):
+		t.Fatal("connection not closed")
+	}
+	expectNone(t, dev)
+	if h.peerRoom[dev] != DeviceRoom("pi1") {
+		t.Fatal("device left its room")
+	}
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if len(rec.closed) != 1 {
+		t.Fatalf("closed %+v", rec.closed)
+	}
+	for _, reason := range rec.closed {
+		if reason != ReasonReplaced {
+			t.Fatalf("close reason %s", reason)
+		}
+	}
+}
+
+func TestDeviceVolumeInPresence(t *testing.T) {
+	h, _ := newTestHub()
+	dev := register(t, h, KindDevice, "pi1")
+	alice := register(t, h, KindWeb, "alice")
+	speaker, mic := 80, 150
+	h.Handle(dev, Message{Type: TypeVolume, Speaker: &speaker, Mic: &mic})
+
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case m := <-alice.send:
+			if m.Type != TypePresence {
+				continue
+			}
+			if len(m.Devices) == 0 || m.Devices[0].Speaker == nil || m.Devices[0].Mic == nil {
+				continue
+			}
+			if *m.Devices[0].Speaker != 80 || *m.Devices[0].Mic != 150 || !m.Devices[0].Online {
+				t.Fatalf("presence %+v", m.Devices[0])
+			}
+			return
+		case <-deadline:
+			t.Fatal("volume did not show up in presence")
+		}
+	}
+}

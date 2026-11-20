@@ -68,11 +68,16 @@ type harness struct {
 	presses chan gpio.Press
 	states  chan State
 	media   *fakeMedia
+	mix     Mixer
 	joinErr error
 	cancel  context.CancelFunc
 }
 
 func start(t *testing.T, cfg Config) *harness {
+	return startWith(t, cfg, nil)
+}
+
+func startWith(t *testing.T, cfg Config, mix Mixer) *harness {
 	h := &harness{
 		t:       t,
 		sig:     &fakeSig{},
@@ -80,6 +85,7 @@ func start(t *testing.T, cfg Config) *harness {
 		presses: make(chan gpio.Press, 4),
 		states:  make(chan State, 32),
 		media:   newFakeMedia(),
+		mix:     mix,
 	}
 	join := func(url, token string) (Media, error) {
 		if h.joinErr != nil {
@@ -87,7 +93,7 @@ func start(t *testing.T, cfg Config) *harness {
 		}
 		return h.media, nil
 	}
-	a := New(cfg, h.sig, join, nopInd{})
+	a := New(cfg, h.sig, join, nopInd{}, h.mix)
 	a.OnState = func(s State) { h.states <- s }
 	ctx, cancel := context.WithCancel(context.Background())
 	h.cancel = cancel
@@ -209,5 +215,73 @@ func TestJoinFailureRequestsFreshToken(t *testing.T) {
 			return
 		}
 		time.Sleep(50 * time.Millisecond)
+	}
+}
+
+type fakeMix struct {
+	mu           sync.Mutex
+	speaker, mic int
+}
+
+func (f *fakeMix) Get() (int, int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.speaker, f.mic, nil
+}
+
+func (f *fakeMix) Set(speaker, mic *int) (int, int, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if speaker != nil {
+		f.speaker = *speaker
+	}
+	if mic != nil {
+		f.mic = *mic
+	}
+	return f.speaker, f.mic, nil
+}
+
+func (f *fakeMix) levels() (int, int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.speaker, f.mic
+}
+
+func (h *harness) waitSent(typ string) signal.Message {
+	h.t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		h.sig.mu.Lock()
+		for i, m := range h.sig.sent {
+			if m.Type == typ {
+				h.sig.sent = append(h.sig.sent[:i], h.sig.sent[i+1:]...)
+				h.sig.mu.Unlock()
+				return m
+			}
+		}
+		h.sig.mu.Unlock()
+		time.Sleep(10 * time.Millisecond)
+	}
+	h.t.Fatalf("timeout waiting for %s, sent %v", typ, h.sig.types())
+	return signal.Message{}
+}
+
+func TestVolumeReportedAndApplied(t *testing.T) {
+	mix := &fakeMix{speaker: 40, mic: 55}
+	h := startWith(t, Config{DeviceID: "pi1"}, mix)
+	h.msgs <- signal.Message{Type: "registered"}
+	got := h.waitSent("volume")
+	if got.Speaker == nil || got.Mic == nil || *got.Speaker != 40 || *got.Mic != 55 {
+		t.Fatalf("reported %+v %+v", got.Speaker, got.Mic)
+	}
+
+	speaker := 80
+	h.msgs <- signal.Message{Type: "set_volume", Speaker: &speaker}
+	got = h.waitSent("volume")
+	if got.Speaker == nil || got.Mic == nil || *got.Speaker != 80 || *got.Mic != 55 {
+		t.Fatalf("after set %+v %+v", got.Speaker, got.Mic)
+	}
+	if sp, mic := mix.levels(); sp != 80 || mic != 55 {
+		t.Fatalf("mixer speaker=%d mic=%d", sp, mic)
 	}
 }

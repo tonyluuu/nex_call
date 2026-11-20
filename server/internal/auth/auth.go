@@ -51,10 +51,19 @@ func CheckDeviceSecret(hash, secret string) bool {
 	return subtle.ConstantTimeCompare([]byte(hash), []byte(HashDeviceSecret(secret))) == 1
 }
 
-// Sessions 用 HMAC 签名的无状态会话令牌：base64(username|expUnix).sig
+// Sessions 用 HMAC 签名的会话令牌：base64(username|expUnix|sessionID).sig。
+// sessionID 存在用户记录里，重新登录会换一个新的，旧令牌随之失效。
 type Sessions struct {
 	key []byte
 	ttl time.Duration
+}
+
+func NewSessionID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 func NewSessions(secret string, ttl time.Duration) *Sessions {
@@ -67,30 +76,34 @@ func (s *Sessions) sign(payload string) string {
 	return base64.RawURLEncoding.EncodeToString(m.Sum(nil))
 }
 
-func (s *Sessions) Issue(username string) string {
+func (s *Sessions) Issue(username, sid string) string {
 	payload := base64.RawURLEncoding.EncodeToString(
-		[]byte(username + "|" + strconv.FormatInt(time.Now().Add(s.ttl).Unix(), 10)))
+		[]byte(username + "|" + strconv.FormatInt(time.Now().Add(s.ttl).Unix(), 10) + "|" + sid))
 	return payload + "." + s.sign(payload)
 }
 
-func (s *Sessions) Verify(token string) (string, error) {
+func (s *Sessions) Verify(token string) (user, sid string, err error) {
 	payload, sig, ok := strings.Cut(token, ".")
 	if !ok || !hmac.Equal([]byte(sig), []byte(s.sign(payload))) {
-		return "", ErrInvalidToken
+		return "", "", ErrInvalidToken
 	}
 	raw, err := base64.RawURLEncoding.DecodeString(payload)
 	if err != nil {
-		return "", ErrInvalidToken
+		return "", "", ErrInvalidToken
 	}
-	user, expStr, ok := strings.Cut(string(raw), "|")
-	if !ok {
-		return "", ErrInvalidToken
+	user, rest, ok := strings.Cut(string(raw), "|")
+	if !ok || user == "" {
+		return "", "", ErrInvalidToken
+	}
+	expStr, sid, ok := strings.Cut(rest, "|")
+	if !ok || sid == "" {
+		return "", "", ErrInvalidToken
 	}
 	exp, err := strconv.ParseInt(expStr, 10, 64)
 	if err != nil || time.Now().Unix() > exp {
-		return "", ErrInvalidToken
+		return "", "", ErrInvalidToken
 	}
-	return user, nil
+	return user, sid, nil
 }
 
 type LiveKit struct {

@@ -12,6 +12,7 @@ import (
 	"nexcall/device/internal/gpio"
 	"nexcall/device/internal/rtc"
 	"nexcall/device/internal/signal"
+	"nexcall/device/internal/volume"
 )
 
 func runAgent(ctx context.Context, cfg *config.Config) error {
@@ -41,7 +42,7 @@ func runAgent(ctx context.Context, cfg *config.Config) error {
 	join := func(url, token string) (agent.Media, error) {
 		return rtc.Join(url, token, opts)
 	}
-	a := agent.New(agent.Config{DeviceID: cfg.DeviceID, CallTarget: cfg.CallTarget}, sig, join, panel)
+	a := agent.New(agent.Config{DeviceID: cfg.DeviceID, CallTarget: cfg.CallTarget}, sig, join, panel, volume.New(cfg.VolumeSink, cfg.VolumeSource))
 	if cfg.CallStateFile != "" {
 		writeCallState(cfg.CallStateFile, agent.Offline)
 		a.OnState = func(s agent.State) { writeCallState(cfg.CallStateFile, s) }

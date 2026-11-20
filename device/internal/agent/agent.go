@@ -28,6 +28,12 @@ type Indicator interface {
 	SetPattern(gpio.Pattern)
 }
 
+// Mixer 读取和设置喇叭、麦克风的系统音量，百分比 0–200。nil 的那一路不改。
+type Mixer interface {
+	Get() (speaker, mic int, err error)
+	Set(speaker, mic *int) (speakerOut, micOut int, err error)
+}
+
 type Config struct {
 	DeviceID string
 	// CallTarget 短按提醒的 Web 用户名，空表示提醒所有在线用户
@@ -59,11 +65,18 @@ type occupancy struct {
 	n   int
 }
 
+type volumeDone struct {
+	speaker int
+	mic     int
+	err     error
+}
+
 type Agent struct {
 	cfg  Config
 	sig  Signaler
 	join JoinFunc
 	ind  Indicator
+	mix  Mixer
 
 	ctx       context.Context
 	events    chan any
@@ -80,8 +93,8 @@ type Agent struct {
 	OnState   func(State)
 }
 
-func New(cfg Config, sig Signaler, join JoinFunc, ind Indicator) *Agent {
-	return &Agent{cfg: cfg, sig: sig, join: join, ind: ind, events: make(chan any, 8)}
+func New(cfg Config, sig Signaler, join JoinFunc, ind Indicator, mix Mixer) *Agent {
+	return &Agent{cfg: cfg, sig: sig, join: join, ind: ind, mix: mix, events: make(chan any, 8)}
 }
 
 func (a *Agent) Run(ctx context.Context, msgs <-chan signal.Message, presses <-chan gpio.Press) {
@@ -145,6 +158,9 @@ func (a *Agent) onMessage(m signal.Message) {
 		a.setState(Offline)
 	case "registered":
 		slog.Info("registered", "self", m.Self, "livekit", m.URL)
+		a.readVolume()
+	case "set_volume":
+		a.applyVolume(m.Speaker, m.Mic)
 	case "joined":
 		slog.Info("room token", "room", m.Room)
 		a.room = m.Room
@@ -182,6 +198,30 @@ func (a *Agent) onPress(p gpio.Press) {
 		to = "web:" + a.cfg.CallTarget
 	}
 	a.send(signal.Message{Type: "notify", To: to})
+}
+
+func (a *Agent) readVolume() {
+	if a.mix == nil {
+		return
+	}
+	go func() {
+		speaker, mic, err := a.mix.Get()
+		a.post(volumeDone{speaker: speaker, mic: mic, err: err})
+	}()
+}
+
+func (a *Agent) applyVolume(speaker, mic *int) {
+	if a.mix == nil || (speaker == nil && mic == nil) {
+		return
+	}
+	go func() {
+		outSpeaker, outMic, err := a.mix.Set(speaker, mic)
+		a.post(volumeDone{speaker: outSpeaker, mic: outMic, err: err})
+	}()
+}
+
+func (a *Agent) reportVolume(speaker, mic int) {
+	a.send(signal.Message{Type: "volume", Speaker: &speaker, Mic: &mic})
 }
 
 func (a *Agent) applyMute() {
@@ -292,6 +332,13 @@ func (a *Agent) onEvent(ev any) {
 			a.userMuted = false
 		}
 		a.applyMute()
+	case volumeDone:
+		if e.err != nil {
+			slog.Warn("volume", "err", e.err)
+			return
+		}
+		slog.Info("volume", "speaker", e.speaker, "mic", e.mic)
+		a.reportVolume(e.speaker, e.mic)
 	case mediaEnded:
 		if e.seq != a.joinSeq {
 			return

@@ -6,6 +6,7 @@ on:
     branches: [main]
     paths:
       - 'device/**'
+      - 'deploy/device/**'
       - '.github/workflows/device.yml'
 
 jobs:
@@ -18,8 +19,26 @@ jobs:
         # 按 Ubuntu 18.04（glibc 2.27）链接。bookworm 的 glibc 更新，同一份二进制两边都能跑。
         run: docker buildx build --platform linux/arm64 -f device/Dockerfile.bionic -o type=local,dest=./device/dist ./device
 
+      - name: 组装部署包
+        run: |
+          set -euo pipefail
+          stage=dist/nexcall-device
+          mkdir -p "$stage"
+          cp device/dist/device-agent "$stage/device-agent"
+          chmod 755 "$stage/device-agent"
+          cp deploy/device/setup.sh \
+             deploy/device/install.sh \
+             deploy/device/audio-test.sh \
+             deploy/device/device-agent.service \
+             deploy/device/device.env.example \
+             deploy/device/pulse-echo-cancel.pa \
+             deploy/device/pipewire-echo-cancel.conf \
+             "$stage/"
+          chmod 755 "$stage"/*.sh
+          tar -C dist -czf dist/nexcall-device-linux-arm64.tar.gz nexcall-device
+
       - uses: actions/upload-artifact@v4
         with:
-          name: device-agent-linux-arm64
-          path: device/dist/device-agent
+          name: nexcall-device-linux-arm64
+          path: dist/nexcall-device-linux-arm64.tar.gz
           if-no-files-found: error
