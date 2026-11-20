@@ -15,68 +15,100 @@
         <button id="notify-dismiss" class="link">忽略</button>
       </div>
 
-      <section id="login-view" class="card login hidden">
-        <h1>NexCall</h1>
-        <p class="muted">香橙派语音通话</p>
-        <form id="login-form">
-          <label>用户名<input name="username" autocomplete="username" required /></label>
-          <label>密码<input name="password" type="password" autocomplete="current-password" required /></label>
-          <button type="submit" class="primary">登录</button>
-          <p id="login-error" class="error"></p>
-        </form>
+      <section id="login-view" class="login-screen hidden">
+        <div class="card login">
+          <h1>NexCall</h1>
+          <form id="login-form">
+            <label>用户名<input name="username" autocomplete="username" required /></label>
+            <label>密码<input name="password" type="password" autocomplete="current-password" required /></label>
+            <button type="submit" class="primary">登录</button>
+            <p id="login-error" class="error"></p>
+          </form>
+        </div>
       </section>
 
       <section id="main-view" class="hidden">
         <header class="topbar">
-          <div class="brand">NexCall</div>
-          <div class="status"><span id="conn-dot" class="dot"></span><span id="conn-text">连接中</span></div>
+          <div class="topbar-row">
+            <div class="brand">NexCall</div>
+            <div class="topbar-account">
+              <span id="user-name"></span>
+              <span class="status"><span id="conn-dot" class="dot"></span><span id="conn-text">连接中</span></span>
+              <button id="logout" class="link" type="button">退出</button>
+            </div>
+          </div>
           <nav class="tabs">
-            <button id="tab-call" class="link on">通话</button>
-            <button id="tab-admin" class="link hidden">管理</button>
+            <button id="tab-call" class="on" type="button">通话</button>
+            <button id="tab-admin" class="hidden" type="button">管理</button>
           </nav>
-          <div class="user"><span id="user-name"></span><button id="logout" class="link">退出</button></div>
         </header>
 
         <main id="call-panel">
-          <h2>设备</h2>
-          <ul id="device-list" class="devices"></ul>
-
-          <h2>在线用户</h2>
-          <ul id="user-list" class="devices"></ul>
-
-          <h2>进行中的通话</h2>
-          <ul id="room-list" class="devices"></ul>
-
-          <h2>通话记录 <button id="refresh-calls" class="link">刷新</button></h2>
-          <table class="calls">
-            <thead><tr><th>时间</th><th>主叫</th><th>被叫</th><th>时长</th><th>结果</th></tr></thead>
-            <tbody id="call-list"></tbody>
-          </table>
+          <section class="block">
+            <h2>设备 <span class="note">点击进入可直接与设备进行通话</span></h2>
+            <div class="block-body"><ul id="device-list" class="devices"></ul></div>
+          </section>
+          <section class="block">
+            <h2>在线用户 <span class="note">点击他人头像可进行呼叫</span></h2>
+            <div class="block-body"><ul id="user-list" class="devices"></ul></div>
+          </section>
+          <section class="block">
+            <h2>进行中的通话</h2>
+            <div class="block-body"><ul id="room-list" class="devices"></ul></div>
+          </section>
+          <section class="block">
+            <h2>通话记录 <button id="refresh-calls" type="button">刷新</button></h2>
+            <div class="block-body">
+              <table class="calls">
+                <thead><tr><th>时间</th><th>主叫</th><th>被叫</th><th>时长</th><th>结果</th></tr></thead>
+                <tbody id="call-list"></tbody>
+              </table>
+              <div id="call-list-pager" class="pager hidden"></div>
+            </div>
+          </section>
         </main>
 
         <main id="admin-panel" class="hidden">
-          <h2>设备设置</h2>
-          <ul id="admin-devices" class="devices"></ul>
-
-          <h2>用户管理</h2>
-          <form id="user-form" class="user-form">
-            <input name="username" placeholder="用户名" autocomplete="off" required />
-            <input name="password" type="password" placeholder="密码（至少 8 位）" autocomplete="new-password" required />
-            <button type="submit" class="primary">添加用户</button>
-            <p id="user-error" class="error"></p>
-          </form>
-          <ul id="admin-users" class="devices"></ul>
-
-          <h2>房间</h2>
-          <ul id="admin-rooms" class="devices"></ul>
-          <h2>全部通话 <button id="refresh-admin-calls" class="link">刷新</button></h2>
-          <table class="calls">
-            <thead><tr><th>时间</th><th>主叫</th><th>被叫</th><th>时长</th><th>结果</th></tr></thead>
-            <tbody id="admin-call-list"></tbody>
-          </table>
+          <section class="block">
+            <h2>设备设置</h2>
+            <div class="block-body"><ul id="admin-devices" class="devices"></ul></div>
+          </section>
+          <section class="block">
+            <h2>用户管理 <button id="user-add-open" type="button">添加用户</button></h2>
+            <div class="block-body table-scroll">
+              <table class="accounts">
+                <thead><tr><th>用户名</th><th>角色</th><th>创建时间</th><th>操作</th></tr></thead>
+                <tbody id="admin-users"></tbody>
+              </table>
+            </div>
+          </section>
+          <section class="block">
+            <h2>房间</h2>
+            <div class="block-body"><ul id="admin-rooms" class="devices"></ul></div>
+          </section>
+          <section class="block">
+            <h2>全部通话 <button id="refresh-admin-calls" type="button">刷新</button></h2>
+            <div class="block-body">
+              <table class="calls">
+                <thead><tr><th>时间</th><th>主叫</th><th>被叫</th><th>时长</th><th>结果</th></tr></thead>
+                <tbody id="admin-call-list"></tbody>
+              </table>
+              <div id="admin-call-list-pager" class="pager hidden"></div>
+            </div>
+          </section>
         </main>
       </section>
 
+      <div id="incoming-call" class="overlay hidden">
+        <div class="call-card">
+          <div id="incoming-text" class="call-peer"></div>
+          <div class="call-state">来电</div>
+          <div class="call-actions">
+            <button id="incoming-reject" class="round hangup" type="button">挂断</button>
+            <button id="incoming-accept" class="round accept" type="button">接听</button>
+          </div>
+        </div>
+      </div>
       <div id="call-overlay" class="overlay hidden">
         <div class="call-card">
           <button id="btn-minimize" class="link minimize hidden" type="button" title="缩小">缩小</button>
@@ -95,18 +127,63 @@
       <div id="volume-dialog" class="overlay hidden">
         <div class="call-card volume-card">
           <div id="volume-title" class="call-peer"></div>
-          <label class="volume-row">喇叭
-            <input id="volume-speaker" type="range" min="0" max="200" step="5" value="100" />
-            <span id="volume-speaker-text">100%</span>
-          </label>
-          <div class="volume-scale"><span>0</span><span>100%</span><span>200%</span></div>
-          <label class="volume-row">麦克风
-            <input id="volume-mic" type="range" min="0" max="200" step="5" value="100" />
-            <span id="volume-mic-text">100%</span>
-          </label>
-          <div class="volume-scale"><span>0</span><span>100%</span><span>200%</span></div>
+          <div class="volume-faders">
+            <div class="fader">
+              <div class="fader-name">喇叭</div>
+              <div id="volume-speaker-text" class="fader-value">100%</div>
+              <div id="volume-speaker-gain" class="fader-gain">软件增益</div>
+              <div class="fader-track">
+                <div class="fader-scale"><span>200%</span><span>100%</span><span>0</span></div>
+                <div class="fader-slot">
+                  <input id="volume-speaker" type="range" min="0" max="200" step="5" value="100" aria-label="喇叭音量" />
+                </div>
+              </div>
+            </div>
+            <div class="fader">
+              <div class="fader-name">麦克风</div>
+              <div id="volume-mic-text" class="fader-value">100%</div>
+              <div id="volume-mic-gain" class="fader-gain">软件增益</div>
+              <div class="fader-track">
+                <div class="fader-scale"><span>200%</span><span>100%</span><span>0</span></div>
+                <div class="fader-slot">
+                  <input id="volume-mic" type="range" min="0" max="200" step="5" value="100" aria-label="麦克风音量" />
+                </div>
+              </div>
+            </div>
+          </div>
           <p class="muted small">0–100% 是硬件音量，超过 100% 是软件增益。</p>
-          <button id="volume-close" class="link" type="button">关闭</button>
+          <button id="volume-close" class="primary volume-close" type="button">保存</button>
+        </div>
+      </div>
+      <div id="user-add-dialog" class="overlay hidden">
+        <form id="user-form" class="dialog-card">
+          <div class="call-peer">添加用户</div>
+          <label>用户名<input name="username" autocomplete="off" required /></label>
+          <label>密码<input name="password" type="password" autocomplete="new-password" required minlength="8" /></label>
+          <p id="user-error" class="error"></p>
+          <div class="dialog-actions">
+            <button id="user-add-cancel" type="button">取消</button>
+            <button class="primary" type="submit">添加</button>
+          </div>
+        </form>
+      </div>
+      <div id="user-action-dialog" class="overlay hidden">
+        <div class="dialog-card">
+          <div id="user-action-title" class="call-peer"></div>
+          <div class="dialog-actions">
+            <button id="user-action-delete" class="danger" type="button">删除</button>
+            <button id="user-action-close" type="button">取消</button>
+          </div>
+        </div>
+      </div>
+      <div id="user-confirm-dialog" class="overlay hidden">
+        <div class="dialog-card">
+          <p id="user-confirm-text"></p>
+          <p id="user-confirm-error" class="error"></p>
+          <div class="dialog-actions">
+            <button id="user-confirm-cancel" type="button">取消</button>
+            <button id="user-confirm-ok" class="danger" type="button">删除</button>
+          </div>
         </div>
       </div>
       <div id="call-mini" class="call-mini hidden">

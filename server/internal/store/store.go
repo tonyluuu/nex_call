@@ -141,6 +141,20 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("migrate users.session_id: %w", err)
 		}
 	}
+	// 参与者不足两人的记录没有真正接通，清掉误写的接通时间。
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE calls SET answered_at = NULL
+		WHERE answered_at IS NOT NULL
+		AND (SELECT COUNT(*) FROM call_participants p WHERE p.call_id = calls.id) < 2`); err != nil {
+		return fmt.Errorf("clear unanswered calls: %w", err)
+	}
+	// 已经有两个人、却没写上接通时间的记录，接通时间就是开始时间。
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE calls SET answered_at = started_at
+		WHERE answered_at IS NULL
+		AND (SELECT COUNT(*) FROM call_participants p WHERE p.call_id = calls.id) >= 2`); err != nil {
+		return fmt.Errorf("fill answered calls: %w", err)
+	}
 	return nil
 }
 
@@ -317,8 +331,13 @@ func (s *Store) TouchDevice(ctx context.Context, id string, t time.Time) error {
 }
 
 func (s *Store) RoomOpened(ctx context.Context, id, caller, callee string, t time.Time) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO calls(id, caller, callee, started_at, answered_at) VALUES(?, ?, ?, ?, ?)`,
-		id, caller, callee, unix(t), unix(t))
+	_, err := s.db.ExecContext(ctx, `INSERT INTO calls(id, caller, callee, started_at, answered_at) VALUES(?, ?, ?, ?, NULL)`,
+		id, caller, callee, unix(t))
+	return err
+}
+
+func (s *Store) MarkAnswered(ctx context.Context, id string, t time.Time) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE calls SET answered_at = ? WHERE id = ? AND answered_at IS NULL`, unix(t), id)
 	return err
 }
 

@@ -11,6 +11,7 @@ export interface Message {
   peer?: string
   reason?: string
   self?: string
+  pending?: boolean
   devices?: DeviceStatus[]
   users?: UserStatus[]
   rooms?: RoomStatus[]

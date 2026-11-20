@@ -14,11 +14,12 @@ func (fakeTokens) RoomToken(room, identity, name string) (string, error) {
 }
 
 type fakeRecorder struct {
-	mu     sync.Mutex
-	opened int
-	closed map[string]string
-	joined []string
-	left   []string
+	mu       sync.Mutex
+	opened   int
+	answered int
+	closed   map[string]string
+	joined   []string
+	left     []string
 }
 
 func (r *fakeRecorder) RoomOpened(context.Context, string, string, string, time.Time) error {
@@ -36,6 +37,12 @@ func (r *fakeRecorder) ParticipantJoined(_ context.Context, _, identity string, 
 func (r *fakeRecorder) ParticipantLeft(_ context.Context, _, identity, reason string, _ time.Time) error {
 	r.mu.Lock()
 	r.left = append(r.left, identity+":"+reason)
+	r.mu.Unlock()
+	return nil
+}
+func (r *fakeRecorder) MarkAnswered(context.Context, string, time.Time) error {
+	r.mu.Lock()
+	r.answered++
 	r.mu.Unlock()
 	return nil
 }
@@ -160,6 +167,26 @@ func TestDeviceRoomStaysAndWebsComeAndGo(t *testing.T) {
 	}
 }
 
+func TestDeviceCallAnsweredOnEveryEntry(t *testing.T) {
+	h, rec := newTestHub()
+	register(t, h, KindDevice, "pi1")
+	alice := register(t, h, KindWeb, "alice")
+
+	h.Handle(alice, Message{Type: TypeJoin, Room: "device:pi1"})
+	expect(t, alice, TypeJoined)
+	h.Handle(alice, Message{Type: TypeLeave})
+	expect(t, alice, TypeLeft)
+
+	h.Handle(alice, Message{Type: TypeJoin, Room: "device:pi1"})
+	expect(t, alice, TypeJoined)
+
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.answered != 2 {
+		t.Fatalf("answered %d, want 2", rec.answered)
+	}
+}
+
 func TestWebCallAutoInviteAndThirdJoin(t *testing.T) {
 	h, rec := newTestHub()
 	alice := register(t, h, KindWeb, "alice")
@@ -168,6 +195,9 @@ func TestWebCallAutoInviteAndThirdJoin(t *testing.T) {
 
 	h.Handle(alice, Message{Type: TypeCall, To: "web:bob"})
 	joined := expect(t, alice, TypeJoined)
+	if !joined.Pending {
+		t.Fatalf("caller should wait for an answer, got %+v", joined)
+	}
 	inv := expect(t, bob, TypeInvite)
 	if inv.Room != joined.Room || inv.From != "web:alice" {
 		t.Fatalf("invite %+v joined %+v", inv, joined)
@@ -175,8 +205,11 @@ func TestWebCallAutoInviteAndThirdJoin(t *testing.T) {
 	expectNone(t, cara)
 
 	h.Handle(bob, Message{Type: TypeJoin, Room: inv.Room})
-	if bj := expect(t, bob, TypeJoined); bj.Room != inv.Room {
+	if bj := expect(t, bob, TypeJoined); bj.Room != inv.Room || bj.Pending {
 		t.Fatalf("bob %+v", bj)
+	}
+	if ans := expect(t, alice, TypeAnswered); ans.Room != inv.Room {
+		t.Fatalf("answered %+v", ans)
 	}
 
 	h.Handle(cara, Message{Type: TypeJoin, Room: inv.Room})
@@ -303,6 +336,7 @@ func TestPeerLeaveEndsCallForTheOther(t *testing.T) {
 	expect(t, bob, TypeInvite)
 	h.Handle(bob, Message{Type: TypeJoin, Room: room})
 	expect(t, bob, TypeJoined)
+	expect(t, alice, TypeAnswered)
 
 	h.Handle(alice, Message{Type: TypeLeave})
 	if m := expect(t, alice, TypeLeft); m.Reason != ReasonNormal {
@@ -344,6 +378,7 @@ func TestThreePartyLeaveKeepsTheRest(t *testing.T) {
 	expect(t, bob, TypeInvite)
 	h.Handle(bob, Message{Type: TypeJoin, Room: room})
 	expect(t, bob, TypeJoined)
+	expect(t, alice, TypeAnswered)
 	h.Handle(cara, Message{Type: TypeJoin, Room: room})
 	expect(t, cara, TypeJoined)
 
@@ -412,6 +447,9 @@ func TestWaitingTimeout(t *testing.T) {
 	if m := expect(t, alice, TypeLeft); m.Reason != ReasonTimeout || m.Room != room {
 		t.Fatalf("timeout %+v", m)
 	}
+	if m := expect(t, bob, TypeLeft); m.Reason != ReasonTimeout || m.Room != room {
+		t.Fatalf("invitee timeout %+v", m)
+	}
 	h.Handle(bob, Message{Type: TypeJoin, Room: room})
 	if m := expect(t, bob, TypeError); m.Reason != "no such room" {
 		t.Fatalf("join after timeout %+v", m)
@@ -422,6 +460,155 @@ func TestWaitingTimeout(t *testing.T) {
 		if reason != ReasonTimeout {
 			t.Fatalf("close reason %s", reason)
 		}
+	}
+	if rec.answered != 0 {
+		t.Fatalf("unanswered call marked answered %d", rec.answered)
+	}
+}
+
+func TestAnsweredOnlyWhenSecondJoins(t *testing.T) {
+	h, rec := newTestHub()
+	alice := register(t, h, KindWeb, "alice")
+	bob := register(t, h, KindWeb, "bob")
+
+	h.Handle(alice, Message{Type: TypeCall, To: "web:bob"})
+	room := expect(t, alice, TypeJoined).Room
+	expect(t, bob, TypeInvite)
+	rec.mu.Lock()
+	if rec.answered != 0 {
+		t.Fatalf("answered while ringing %d", rec.answered)
+	}
+	rec.mu.Unlock()
+
+	h.Handle(bob, Message{Type: TypeJoin, Room: room})
+	expect(t, bob, TypeJoined)
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.answered != 1 {
+		t.Fatalf("answered %d", rec.answered)
+	}
+}
+
+func TestStrangerCannotJoinUnansweredCall(t *testing.T) {
+	h, rec := newTestHub()
+	alice := register(t, h, KindWeb, "alice")
+	bob := register(t, h, KindWeb, "bob")
+	cara := register(t, h, KindWeb, "cara")
+
+	h.Handle(alice, Message{Type: TypeCall, To: "web:bob"})
+	room := expect(t, alice, TypeJoined).Room
+	expect(t, bob, TypeInvite)
+
+	h.Handle(cara, Message{Type: TypeJoin, Room: room})
+	if m := expect(t, cara, TypeError); m.Reason != "not invited" {
+		t.Fatalf("stranger %+v", m)
+	}
+	expectNone(t, alice)
+	rec.mu.Lock()
+	defer rec.mu.Unlock()
+	if rec.answered != 0 {
+		t.Fatalf("stranger answered the call")
+	}
+}
+
+func TestTimeoutThenCalleeCallsBack(t *testing.T) {
+	h := NewHub(fakeTokens{}, &fakeRecorder{}, fakeDir{ids: []string{"pi1"}}, "wss://test", 40*time.Millisecond)
+	alice := register(t, h, KindWeb, "alice")
+	bob := register(t, h, KindWeb, "bob")
+
+	h.Handle(alice, Message{Type: TypeCall, To: "web:bob"})
+	old := expect(t, alice, TypeJoined).Room
+	expect(t, bob, TypeInvite)
+	if m := expect(t, alice, TypeLeft); m.Reason != ReasonTimeout {
+		t.Fatalf("alice timeout %+v", m)
+	}
+	if m := expect(t, bob, TypeLeft); m.Reason != ReasonTimeout {
+		t.Fatalf("bob timeout %+v", m)
+	}
+
+	h.Handle(bob, Message{Type: TypeCall, To: "web:alice"})
+	joined := expect(t, bob, TypeJoined)
+	if !joined.Pending || joined.Room == "" || joined.Room == old {
+		t.Fatalf("call back joined %+v old %s", joined, old)
+	}
+	if m := expect(t, alice, TypeInvite); m.Room != joined.Room || m.From != "web:bob" {
+		t.Fatalf("call back invite %+v", m)
+	}
+	expectNone(t, alice)
+	expectNone(t, bob)
+}
+
+func TestRejectClosesOnlyAdhocRoom(t *testing.T) {
+	h, _ := newTestHub()
+	dev := register(t, h, KindDevice, "pi1")
+	alice := register(t, h, KindWeb, "alice")
+	bob := register(t, h, KindWeb, "bob")
+
+	h.Handle(alice, Message{Type: TypeCall, To: "web:bob"})
+	room := expect(t, alice, TypeJoined).Room
+	expect(t, bob, TypeInvite)
+
+	h.Handle(bob, Message{Type: TypeReject, Room: room})
+	if m := expect(t, bob, TypeLeft); m.Reason != ReasonDeclined || m.Room != room {
+		t.Fatalf("bob %+v", m)
+	}
+	if m := expect(t, alice, TypeLeft); m.Reason != ReasonDeclined || m.Room != room {
+		t.Fatalf("alice %+v", m)
+	}
+	expectNone(t, dev)
+	if h.peerRoom[dev] != DeviceRoom("pi1") {
+		t.Fatal("device left its room")
+	}
+	for _, r := range h.presence().Rooms {
+		if r.ID == room {
+			t.Fatalf("adhoc room still listed %+v", r)
+		}
+		if r.DeviceID == "pi1" && len(r.Members) == 0 {
+			t.Fatal("device room lost its device")
+		}
+	}
+}
+
+func TestCallerCancelDismissesInvite(t *testing.T) {
+	h, _ := newTestHub()
+	alice := register(t, h, KindWeb, "alice")
+	bob := register(t, h, KindWeb, "bob")
+
+	h.Handle(alice, Message{Type: TypeCall, To: "web:bob"})
+	room := expect(t, alice, TypeJoined).Room
+	expect(t, bob, TypeInvite)
+
+	h.Handle(alice, Message{Type: TypeLeave})
+	if m := expect(t, alice, TypeLeft); m.Reason != ReasonNormal {
+		t.Fatalf("alice %+v", m)
+	}
+	if m := expect(t, bob, TypeLeft); m.Room != room {
+		t.Fatalf("bob %+v", m)
+	}
+}
+
+func TestRingingInviteeIsBusy(t *testing.T) {
+	h, _ := newTestHub()
+	alice := register(t, h, KindWeb, "alice")
+	bob := register(t, h, KindWeb, "bob")
+	cara := register(t, h, KindWeb, "cara")
+
+	h.Handle(alice, Message{Type: TypeCall, To: "web:bob"})
+	expect(t, alice, TypeJoined)
+	expect(t, bob, TypeInvite)
+
+	h.Handle(cara, Message{Type: TypeCall, To: "web:bob"})
+	if m := expect(t, cara, TypeError); m.Reason != ReasonBusy {
+		t.Fatalf("got %+v", m)
+	}
+	var busy bool
+	for _, u := range h.presence().Users {
+		if u.ID == "bob" {
+			busy = u.Busy
+		}
+	}
+	if !busy {
+		t.Fatal("ringing user should be busy")
 	}
 }
 

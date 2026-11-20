@@ -3,12 +3,13 @@ package signal
 
 import "time"
 
-// 客户端发往服务端：join / call / leave / notify / kick / volume / ping。
-// 服务端发往客户端：registered / presence / joined / invite / notify / left / kicked / session_ended / set_volume / error / pong。
+// 客户端发往服务端：join / call / leave / reject / notify / kick / volume / ping。
+// 服务端发往客户端：registered / presence / joined / invite / answered / notify / left / kicked / session_ended / set_volume / error / pong。
 const (
 	TypeJoin         = "join"
 	TypeCall         = "call"
 	TypeLeave        = "leave"
+	TypeReject       = "reject"
 	TypeNotify       = "notify"
 	TypeKick         = "kick"
 	TypeVolume       = "volume"
@@ -19,6 +20,7 @@ const (
 	TypePresence     = "presence"
 	TypeJoined       = "joined"
 	TypeInvite       = "invite"
+	TypeAnswered     = "answered"
 	TypeLeft         = "left"
 	TypeKicked       = "kicked"
 	TypeSessionEnded = "session_ended"
@@ -33,6 +35,7 @@ const (
 	ReasonKicked       = "kicked"
 	ReasonPeerLeft     = "peer_left"
 	ReasonTimeout      = "timeout"
+	ReasonDeclined     = "declined"
 	ReasonReplaced     = "replaced"
 	ReasonDeleted      = "deleted"
 	RoleAdmin          = "admin"
@@ -49,6 +52,7 @@ type Message struct {
 	Peer    string         `json:"peer,omitempty"`
 	Reason  string         `json:"reason,omitempty"`
 	Self    string         `json:"self,omitempty"`
+	Pending bool           `json:"pending,omitempty"`
 	Speaker *int           `json:"speaker,omitempty"`
 	Mic     *int           `json:"mic,omitempty"`
 	Devices []DeviceStatus `json:"devices,omitempty"`

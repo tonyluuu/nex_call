@@ -8,8 +8,9 @@ on:
       - 'web/**'
       - '.github/workflows/web.yml'
 
+# 不和 server 共用并发组：同组只保留一个排队任务，后来的 server 部署会把排队中的 web 部署取消掉
 concurrency:
-  group: deploy-vps
+  group: deploy-web
   cancel-in-progress: false
 
 jobs:

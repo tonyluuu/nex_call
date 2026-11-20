@@ -63,6 +63,7 @@ type Recorder interface {
 	ParticipantJoined(ctx context.Context, callID, identity string, t time.Time) error
 	ParticipantLeft(ctx context.Context, callID, identity, reason string, t time.Time) error
 	RoomClosed(ctx context.Context, id, reason string, t time.Time) error
+	MarkAnswered(ctx context.Context, id string, t time.Time) error
 }
 
 type Remover interface {
@@ -83,6 +84,8 @@ type room struct {
 	recordID string
 	started  time.Time
 	timer    *time.Timer
+	invitee  *Peer
+	answered bool
 }
 
 type Hub struct {
@@ -183,6 +186,8 @@ func (h *Hub) Unregister(p *Peer) {
 	}
 	if h.peerRoom[p] != "" {
 		h.leaveLocked(p, ReasonDisconnected)
+	} else {
+		h.dropInviteLocked(p)
 	}
 	h.mu.Unlock()
 
@@ -205,6 +210,8 @@ func (h *Hub) Handle(p *Peer, m Message) {
 		h.call(p, m.To)
 	case TypeLeave:
 		h.leave(p)
+	case TypeReject:
+		h.reject(p, m.Room)
 	case TypeNotify:
 		h.notify(p, m.To)
 	case TypeKick:
@@ -219,11 +226,11 @@ func (h *Hub) Handle(p *Peer, m Message) {
 func (h *Hub) enterDeviceLocked(p *Peer) {
 	r := h.ensureDeviceRoomLocked(p.ID)
 	if h.peerRoom[p] == r.id {
-		h.sendJoinedLocked(p, r)
+		h.sendJoinedLocked(p, r, false)
 		return
 	}
 	h.addMemberLocked(r, p, "", "")
-	h.sendJoinedLocked(p, r)
+	h.sendJoinedLocked(p, r, false)
 }
 
 func (h *Hub) ensureDeviceRoomLocked(id string) *room {
@@ -254,8 +261,18 @@ func (h *Hub) join(p *Peer, ref string) {
 		return
 	}
 	if h.peerRoom[p] == r.id {
-		h.sendJoinedLocked(p, r)
+		h.sendJoinedLocked(p, r, false)
 		return
+	}
+	// 还没人接听的网页互叫房间，只有被叫能进来。旁人点「加入」不能把这次呼叫直接接通。
+	if r.deviceID == "" && r.invitee != p && len(r.members) < 2 {
+		p.Send(Message{Type: TypeError, Room: r.id, Reason: "not invited"})
+		return
+	}
+	wasInvitee := r.invitee == p
+	h.clearOtherInvitesLocked(p, r)
+	if wasInvitee {
+		r.invitee = nil
 	}
 	caller, callee := "", ""
 	if p.Kind == KindWeb {
@@ -267,9 +284,16 @@ func (h *Hub) join(p *Peer, ref string) {
 		}
 	}
 	h.addMemberLocked(r, p, caller, callee)
-	if !h.sendJoinedLocked(p, r) {
+	if !h.sendJoinedLocked(p, r, false) {
 		h.leaveLocked(p, ReasonNormal)
 		return
+	}
+	if wasInvitee {
+		for m := range r.members {
+			if m != p {
+				m.Send(Message{Type: TypeAnswered, Room: r.id})
+			}
+		}
 	}
 	if len(r.members) < 2 {
 		h.armWaitLocked(r)
@@ -311,7 +335,7 @@ func (h *Hub) call(p *Peer, to string) {
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if h.peerRoom[p] != "" {
+	if h.peerRoom[p] != "" || h.ringingLocked(p) {
 		p.Send(Message{Type: TypeError, Reason: "already in a room"})
 		return
 	}
@@ -322,7 +346,7 @@ func (h *Hub) call(p *Peer, to string) {
 	}
 	var invitee *Peer
 	for wp := range set {
-		if h.peerRoom[wp] == "" {
+		if h.peerRoom[wp] == "" && !h.ringingLocked(wp) {
 			invitee = wp
 			break
 		}
@@ -339,14 +363,32 @@ func (h *Hub) call(p *Peer, to string) {
 		recorded: map[*Peer]struct{}{},
 	}
 	h.rooms[r.id] = r
+	r.invitee = invitee
 	h.addMemberLocked(r, p, p.Address(), to)
-	if !h.sendJoinedLocked(p, r) {
+	if !h.sendJoinedLocked(p, r, true) {
+		r.invitee = nil
 		h.leaveLocked(p, ReasonNormal)
 		return
 	}
 	invitee.Send(Message{Type: TypeInvite, Room: r.id, From: p.Address()})
 	h.armWaitLocked(r)
 	slog.Info("adhoc room", "room", r.id, "from", p.Address(), "to", to)
+	h.broadcastPresenceLocked()
+}
+
+func (h *Hub) reject(p *Peer, roomID string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	r := h.rooms[roomID]
+	if r == nil || r.invitee != p {
+		p.Send(Message{Type: TypeError, Reason: "not invited"})
+		return
+	}
+	r.invitee = nil
+	p.Send(Message{Type: TypeLeft, Room: r.id, Reason: ReasonDeclined})
+	if r.deviceID == "" && h.webCount(r) < 2 {
+		h.closeCallLocked(r, ReasonDeclined)
+	}
 	h.broadcastPresenceLocked()
 }
 
@@ -520,6 +562,7 @@ func (h *Hub) addMemberLocked(r *room, p *Peer, caller, callee string) {
 	if p.Kind == KindWeb && r.recordID == "" {
 		r.recordID = newID("c_")
 		r.started = now
+		r.answered = false
 		if caller == "" {
 			caller = p.Address()
 		}
@@ -532,13 +575,28 @@ func (h *Hub) addMemberLocked(r *room, p *Peer, caller, callee string) {
 		for m, joined := range r.members {
 			h.recordJoinLocked(r, m, joined)
 		}
+		h.maybeAnswerLocked(r, now)
+		if len(r.members) >= 2 {
+			h.stopWaitLocked(r)
+		}
 		return
 	}
 	if r.recordID != "" {
 		h.recordJoinLocked(r, p, r.members[p])
 	}
 	if len(r.members) >= 2 {
+		h.maybeAnswerLocked(r, now)
 		h.stopWaitLocked(r)
+	}
+}
+
+func (h *Hub) maybeAnswerLocked(r *room, t time.Time) {
+	if r.recordID == "" || r.answered || len(r.members) < 2 {
+		return
+	}
+	r.answered = true
+	if err := h.recorder.MarkAnswered(context.Background(), r.recordID, t); err != nil {
+		slog.Error("mark answered", "err", err)
 	}
 }
 
@@ -582,6 +640,7 @@ func (h *Hub) leaveLocked(p *Peer, reason string) {
 		h.stopWaitLocked(r)
 	}
 	if r.deviceID == "" && h.webCount(r) == 0 {
+		h.dismissInviteLocked(r, reason)
 		h.stopWaitLocked(r)
 		delete(h.rooms, r.id)
 	}
@@ -594,6 +653,7 @@ func (h *Hub) leaveLocked(p *Peer, reason string) {
 
 // closeCallLocked 人数不足两人时结束通话：通知剩下的网页退出，临时房间删除，设备房间只留 Pi。
 func (h *Hub) closeCallLocked(r *room, reason string) {
+	h.dismissInviteLocked(r, reason)
 	h.stopWaitLocked(r)
 	now := time.Now()
 	var webs []*Peer
@@ -628,6 +688,7 @@ func (h *Hub) finishRecordLocked(r *room, reason string) {
 	}
 	r.recordID = ""
 	r.started = time.Time{}
+	r.answered = false
 	r.recorded = map[*Peer]struct{}{}
 }
 
@@ -678,15 +739,56 @@ func (h *Hub) webCount(r *room) int {
 	return n
 }
 
-func (h *Hub) sendJoinedLocked(p *Peer, r *room) bool {
+func (h *Hub) sendJoinedLocked(p *Peer, r *room, pending bool) bool {
 	token, err := h.tokens.RoomToken(r.id, p.Address(), p.Name)
 	if err != nil {
 		slog.Error("issue token", "err", err)
 		p.Send(Message{Type: TypeError, Room: r.id, Reason: "internal error"})
 		return false
 	}
-	p.Send(Message{Type: TypeJoined, Room: r.id, Token: token, URL: h.livekitURL})
+	p.Send(Message{Type: TypeJoined, Room: r.id, Token: token, URL: h.livekitURL, Pending: pending})
 	return true
+}
+
+func (h *Hub) ringingLocked(p *Peer) bool {
+	for _, r := range h.rooms {
+		if r.invitee == p {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *Hub) dismissInviteLocked(r *room, reason string) {
+	if r.invitee == nil {
+		return
+	}
+	r.invitee.Send(Message{Type: TypeLeft, Room: r.id, Reason: reason})
+	r.invitee = nil
+}
+
+func (h *Hub) clearOtherInvitesLocked(p *Peer, except *room) {
+	for _, r := range h.rooms {
+		if r == except || r.invitee != p {
+			continue
+		}
+		r.invitee = nil
+		if r.deviceID == "" && h.webCount(r) < 2 {
+			h.closeCallLocked(r, ReasonDeclined)
+		}
+	}
+}
+
+func (h *Hub) dropInviteLocked(p *Peer) {
+	for _, r := range h.rooms {
+		if r.invitee != p {
+			continue
+		}
+		r.invitee = nil
+		if r.deviceID == "" && h.webCount(r) < 2 {
+			h.closeCallLocked(r, ReasonDisconnected)
+		}
+	}
 }
 
 func (h *Hub) presence() Message {
@@ -720,6 +822,9 @@ func (h *Hub) presenceLocked() Message {
 				u.Busy = true
 				u.Room = rid
 				break
+			}
+			if h.ringingLocked(wp) {
+				u.Busy = true
 			}
 		}
 		users = append(users, u)
