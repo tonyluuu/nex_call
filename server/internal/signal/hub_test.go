@@ -144,10 +144,13 @@ func TestDeviceRoomStaysAndWebsComeAndGo(t *testing.T) {
 	if aj.Room != DeviceRoom("pi1") || aj.Token != "tok:"+DeviceRoom("pi1")+":web:alice" {
 		t.Fatalf("alice joined %+v", aj)
 	}
-	expectNone(t, dev)
+	if m := expect(t, dev, TypeIncoming); m.From != "alice" || m.Room != DeviceRoom("pi1") {
+		t.Fatalf("incoming %+v", m)
+	}
 
 	h.Handle(bob, Message{Type: TypeJoin, Room: DeviceRoom("pi1")})
 	expect(t, bob, TypeJoined)
+	expectNone(t, dev)
 
 	if s := h.Snapshot(); !s[0].Online || !s[0].Busy {
 		t.Fatalf("snapshot %+v", s)
@@ -169,16 +172,27 @@ func TestDeviceRoomStaysAndWebsComeAndGo(t *testing.T) {
 
 func TestDeviceCallAnsweredOnEveryEntry(t *testing.T) {
 	h, rec := newTestHub()
-	register(t, h, KindDevice, "pi1")
+	dev := register(t, h, KindDevice, "pi1")
 	alice := register(t, h, KindWeb, "alice")
 
-	h.Handle(alice, Message{Type: TypeJoin, Room: "device:pi1"})
-	expect(t, alice, TypeJoined)
+	enter := func() {
+		h.Handle(alice, Message{Type: TypeJoin, Room: "device:pi1"})
+		joined := expect(t, alice, TypeJoined)
+		if !joined.Pending {
+			t.Fatal("web should wait while the device plays the prompt")
+		}
+		if m := expect(t, dev, TypeIncoming); m.From != "alice" {
+			t.Fatalf("incoming %+v", m)
+		}
+		h.Handle(dev, Message{Type: TypeReady})
+		if m := expect(t, alice, TypeAnswered); m.Room != DeviceRoom("pi1") {
+			t.Fatalf("answered %+v", m)
+		}
+	}
+	enter()
 	h.Handle(alice, Message{Type: TypeLeave})
 	expect(t, alice, TypeLeft)
-
-	h.Handle(alice, Message{Type: TypeJoin, Room: "device:pi1"})
-	expect(t, alice, TypeJoined)
+	enter()
 
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
@@ -266,6 +280,9 @@ func TestKickRemovesWebNotDevice(t *testing.T) {
 
 	h.Handle(alice, Message{Type: TypeJoin, Room: "device:pi1"})
 	room := expect(t, alice, TypeJoined).Room
+	if m := expect(t, dev, TypeIncoming); m.From != "alice" {
+		t.Fatalf("incoming %+v", m)
+	}
 
 	h.Handle(alice, Message{Type: TypeKick, Room: room, Peer: "web:alice"})
 	if m := expect(t, alice, TypeError); m.Reason != "forbidden" {
@@ -401,6 +418,9 @@ func TestWebLeaveKeepsDeviceInRoom(t *testing.T) {
 
 	h.Handle(alice, Message{Type: TypeJoin, Room: "device:pi1"})
 	expect(t, alice, TypeJoined)
+	if m := expect(t, dev, TypeIncoming); m.From != "alice" {
+		t.Fatalf("incoming %+v", m)
+	}
 	h.Handle(alice, Message{Type: TypeLeave})
 	if m := expect(t, alice, TypeLeft); m.Reason != ReasonNormal {
 		t.Fatalf("alice %+v", m)
@@ -618,6 +638,9 @@ func TestEndUserSessionLeavesRoom(t *testing.T) {
 	alice := register(t, h, KindWeb, "alice")
 	h.Handle(alice, Message{Type: TypeJoin, Room: "device:pi1"})
 	expect(t, alice, TypeJoined)
+	if m := expect(t, dev, TypeIncoming); m.From != "alice" {
+		t.Fatalf("incoming %+v", m)
+	}
 
 	h.EndUserSessions("alice", ReasonReplaced)
 	if m := expect(t, alice, TypeSessionEnded); m.Reason != ReasonReplaced {

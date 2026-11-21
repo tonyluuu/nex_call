@@ -15,6 +15,7 @@ import time
 
 from flask import Flask, Response, jsonify, render_template, request, send_file
 
+from announce import AnnounceError, SOUNDS, clean_sound, speak
 from levels import (
     AEC_KEYS,
     Pactl,
@@ -511,7 +512,27 @@ def state():
     except (RuntimeError, ValueError) as exc:
         data["levels"] = None
         data["levelsError"] = str(exc)
+    data["announce"] = announce_config()
     return jsonify(data)
+
+
+def announce_config():
+    data = load_settings()
+    enabled = data.get("announceEnabled", True)
+    if not isinstance(enabled, bool):
+        enabled = True
+    return {
+        "enabled": enabled,
+        "sound": clean_sound(data.get("announceSound")),
+        "sounds": [{"id": sound_id, "label": label} for sound_id, label in SOUNDS],
+    }
+
+
+def save_announce(enabled, sound):
+    if not isinstance(enabled, bool):
+        raise AnnounceError("enabled 需要是布尔值")
+    save_settings({"announceEnabled": enabled, "announceSound": clean_sound(sound)})
+    return announce_config()
 
 
 def storage_usage(tracks):
@@ -594,6 +615,12 @@ def current_aec():
     if not argument:
         return parse_aec(""), False, ""
     return parse_aec(argument), True, ""
+
+
+def speaker_sink():
+    """提示音直接送到喇叭，避开通话用的回声消除。"""
+    sink, _ = module_masters()
+    return sink or ""
 
 
 def module_masters():
@@ -761,6 +788,41 @@ def cover():
     return Response(data, mimetype=mime, headers={"Cache-Control": "max-age=86400"})
 
 
+@app.post("/api/announce/settings")
+def announce_settings():
+    body = request.get_json(silent=True) or {}
+    try:
+        saved = save_announce(body.get("enabled"), body.get("sound"))
+    except AnnounceError as exc:
+        return jsonify(error=str(exc)), 400
+    return jsonify(saved)
+
+
+@app.post("/api/announce/preview")
+def announce_preview():
+    body = request.get_json(silent=True) or {}
+    sound = clean_sound(body.get("sound") or announce_config()["sound"])
+    try:
+        speak(sound, player.pause_for_call, speaker_sink())
+    except AnnounceError as exc:
+        return jsonify(error=str(exc)), 400
+    return jsonify(played=True)
+
+
+@app.post("/api/announce")
+def announce_play():
+    """设备在接通前调用。关掉或放不出来时返回 played=false，不让通话卡住。"""
+    settings = announce_config()
+    if not settings["enabled"]:
+        return jsonify(played=False)
+    try:
+        speak(settings["sound"], player.pause_for_call, speaker_sink())
+    except AnnounceError as exc:
+        log.warning("announce: %s", exc)
+        return jsonify(played=False)
+    return jsonify(played=True)
+
+
 @app.post("/api/volume")
 def volume():
     body = request.get_json(silent=True) or {}
@@ -921,6 +983,17 @@ def recording_download(name):
     return _wav_response(path, name)
 
 
+@app.post("/api/beep")
+def beep():
+    """网页调完喇叭后由设备调用。不暂停正在放的音乐。"""
+    try:
+        speak("high", None, speaker_sink())
+    except AnnounceError as exc:
+        log.warning("volume beep: %s", exc)
+        return jsonify(played=False)
+    return jsonify(played=True)
+
+
 @app.post("/api/levels")
 def levels():
     body = request.get_json(silent=True) or {}
@@ -931,6 +1004,11 @@ def levels():
         speaker = body["speaker"] if "speaker" in body else None
         mic = body["mic"] if "mic" in body else None
         got_speaker, got_mic = Pactl().set(speaker, mic)
+        if speaker is not None and body.get("beep"):
+            try:
+                speak("high", None, speaker_sink())
+            except AnnounceError as exc:
+                log.warning("volume beep: %s", exc)
         return jsonify(speaker=got_speaker, mic=got_mic)
     return _audio_call(run)
 

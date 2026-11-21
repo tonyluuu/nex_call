@@ -40,7 +40,9 @@ type Session struct {
 
 	mu      sync.Mutex
 	players map[string]*playout.Player
-	muted   atomic.Bool
+	// held 为 true 时丢掉已经取出的远端音频，避免提示音结束后把积压的声音一次放出来。
+	held  atomic.Bool
+	muted atomic.Bool
 
 	occ       chan int
 	done      chan struct{}
@@ -140,6 +142,9 @@ func (s *Session) Occupancy() <-chan int { return s.occ }
 
 // SetMuted 为 true 时不往房间送麦克风数据。
 func (s *Session) SetMuted(muted bool) { s.muted.Store(muted) }
+
+// SetHeld 为 true 时不把对方的声音送到喇叭。
+func (s *Session) SetHeld(held bool) { s.held.Store(held) }
 
 func (s *Session) publishCount() {
 	n := 0
@@ -288,6 +293,9 @@ func (s *Session) pull(out []int16) {
 	}
 	playout.Mix(out, bufs)
 	playout.ApplyGain(out, s.opts.PlaybackGain)
+	if s.held.Load() {
+		clear(out)
+	}
 }
 
 func (s *Session) statsLoop() {

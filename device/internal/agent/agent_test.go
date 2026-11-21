@@ -46,6 +46,7 @@ type fakeMedia struct {
 	once   sync.Once
 	mu     sync.Mutex
 	muted  bool
+	held   bool
 }
 
 func newFakeMedia() *fakeMedia {
@@ -54,7 +55,9 @@ func newFakeMedia() *fakeMedia {
 func (m *fakeMedia) Occupancy() <-chan int { return m.occ }
 func (m *fakeMedia) Done() <-chan struct{} { return m.done }
 func (m *fakeMedia) SetMuted(v bool)       { m.mu.Lock(); m.muted = v; m.mu.Unlock() }
+func (m *fakeMedia) SetHeld(v bool)        { m.mu.Lock(); m.held = v; m.mu.Unlock() }
 func (m *fakeMedia) isMuted() bool         { m.mu.Lock(); defer m.mu.Unlock(); return m.muted }
+func (m *fakeMedia) isHeld() bool          { m.mu.Lock(); defer m.mu.Unlock(); return m.held }
 func (m *fakeMedia) Close()                { m.once.Do(func() { close(m.closed) }) }
 
 type nopInd struct{}
@@ -284,4 +287,150 @@ func TestVolumeReportedAndApplied(t *testing.T) {
 	if sp, mic := mix.levels(); sp != 80 || mic != 55 {
 		t.Fatalf("mixer speaker=%d mic=%d", sp, mic)
 	}
+}
+
+type countingBeeper struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (c *countingBeeper) Announce(context.Context, string) error { return nil }
+
+func (c *countingBeeper) Beep(context.Context) error {
+	c.mu.Lock()
+	c.n++
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *countingBeeper) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.n
+}
+
+func TestSpeakerAdjustBeepsOnce(t *testing.T) {
+	prev := volumeBeepDelay
+	volumeBeepDelay = 40 * time.Millisecond
+	t.Cleanup(func() { volumeBeepDelay = prev })
+
+	beeper := &countingBeeper{}
+	mix := &fakeMix{speaker: 40, mic: 55}
+	h := startWith(t, Config{DeviceID: "pi1", Announce: beeper}, mix)
+	h.msgs <- signal.Message{Type: "registered"}
+	h.waitSent("volume")
+
+	first, second := 80, 90
+	h.msgs <- signal.Message{Type: "set_volume", Speaker: &first}
+	time.Sleep(15 * time.Millisecond)
+	h.msgs <- signal.Message{Type: "set_volume", Speaker: &second}
+	time.Sleep(120 * time.Millisecond)
+	if n := beeper.count(); n != 1 {
+		t.Fatalf("beeps=%d", n)
+	}
+
+	mic := 70
+	h.msgs <- signal.Message{Type: "set_volume", Mic: &mic}
+	time.Sleep(120 * time.Millisecond)
+	if n := beeper.count(); n != 1 {
+		t.Fatalf("mic change beeped, beeps=%d", n)
+	}
+}
+
+func TestVolumePollReportsLocalChange(t *testing.T) {
+	prev := volumePollEvery
+	volumePollEvery = 20 * time.Millisecond
+	t.Cleanup(func() { volumePollEvery = prev })
+
+	mix := &fakeMix{speaker: 40, mic: 55}
+	h := startWith(t, Config{DeviceID: "pi1"}, mix)
+	h.msgs <- signal.Message{Type: "registered"}
+	h.waitSent("volume")
+
+	mix.mu.Lock()
+	mix.speaker = 120
+	mix.mic = 70
+	mix.mu.Unlock()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		got := h.waitSent("volume")
+		if got.Speaker != nil && got.Mic != nil && *got.Speaker == 120 && *got.Mic == 70 {
+			return
+		}
+	}
+	t.Fatal("local volume change was not reported")
+}
+
+type gateAnnouncer struct {
+	started chan string
+	release chan struct{}
+	calls   int
+}
+
+func (g *gateAnnouncer) Announce(ctx context.Context, name string) error {
+	g.calls++
+	g.started <- name
+	select {
+	case <-g.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func TestAnnounceBeforeUnmute(t *testing.T) {
+	gate := &gateAnnouncer{started: make(chan string, 1), release: make(chan struct{})}
+	h := start(t, Config{DeviceID: "pi1", Announce: gate})
+	h.joinRoom()
+	h.msgs <- signal.Message{Type: "incoming", From: "alice"}
+	h.media.occ <- 1
+	select {
+	case name := <-gate.started:
+		if name != "alice" {
+			t.Fatalf("name %s", name)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("announce did not start")
+	}
+	if !h.media.isMuted() || !h.media.isHeld() {
+		t.Fatal("call audio should stay held while the prompt plays")
+	}
+	close(gate.release)
+	h.wait(Active)
+	if h.media.isMuted() || h.media.isHeld() {
+		t.Fatal("call should open after the prompt")
+	}
+	h.media.occ <- 2
+	time.Sleep(50 * time.Millisecond)
+	if gate.calls != 1 {
+		t.Fatalf("announced %d times", gate.calls)
+	}
+}
+
+func TestAnnounceSkippedWhenCallerLeaves(t *testing.T) {
+	gate := &gateAnnouncer{started: make(chan string, 1), release: make(chan struct{})}
+	h := start(t, Config{DeviceID: "pi1", Announce: gate})
+	h.joinRoom()
+	h.media.occ <- 1
+	time.Sleep(30 * time.Millisecond)
+	h.msgs <- signal.Message{Type: "incoming", From: "bob"}
+	select {
+	case name := <-gate.started:
+		if name != "bob" {
+			t.Fatalf("name %s", name)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("announce did not start")
+	}
+	h.media.occ <- 0
+	close(gate.release)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if !h.media.isHeld() && h.media.isMuted() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("held=%v muted=%v", h.media.isHeld(), h.media.isMuted())
 }

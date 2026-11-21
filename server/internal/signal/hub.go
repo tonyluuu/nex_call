@@ -218,6 +218,8 @@ func (h *Hub) Handle(p *Peer, m Message) {
 		h.kick(p, m.Room, m.Peer)
 	case TypeVolume:
 		h.reportVolume(p, m)
+	case TypeReady:
+		h.ready(p)
 	default:
 		p.Send(Message{Type: TypeError, Reason: "unknown message type: " + m.Type})
 	}
@@ -275,6 +277,7 @@ func (h *Hub) join(p *Peer, ref string) {
 		r.invitee = nil
 	}
 	caller, callee := "", ""
+	webBefore := h.webCount(r)
 	if p.Kind == KindWeb {
 		caller = p.Address()
 		if r.deviceID != "" {
@@ -284,7 +287,18 @@ func (h *Hub) join(p *Peer, ref string) {
 		}
 	}
 	h.addMemberLocked(r, p, caller, callee)
-	if !h.sendJoinedLocked(p, r, false) {
+	if p.Kind == KindWeb && r.deviceID != "" && webBefore == 0 {
+		if dp := h.devPeers[r.deviceID]; dp != nil {
+			name := p.Name
+			if name == "" {
+				name = p.ID
+			}
+			dp.Send(Message{Type: TypeIncoming, From: name, Peer: p.Address(), Room: r.id})
+		}
+	}
+	// 设备在线且提示音还没放完时，网页先停在等待，收到 answered 再进媒体房间。
+	pending := p.Kind == KindWeb && r.deviceID != "" && !r.answered && h.devPeers[r.deviceID] != nil
+	if !h.sendJoinedLocked(p, r, pending) {
 		h.leaveLocked(p, ReasonNormal)
 		return
 	}
@@ -575,7 +589,9 @@ func (h *Hub) addMemberLocked(r *room, p *Peer, caller, callee string) {
 		for m, joined := range r.members {
 			h.recordJoinLocked(r, m, joined)
 		}
-		h.maybeAnswerLocked(r, now)
+		if r.deviceID == "" {
+			h.maybeAnswerLocked(r, now)
+		}
 		if len(r.members) >= 2 {
 			h.stopWaitLocked(r)
 		}
@@ -585,8 +601,30 @@ func (h *Hub) addMemberLocked(r *room, p *Peer, caller, callee string) {
 		h.recordJoinLocked(r, p, r.members[p])
 	}
 	if len(r.members) >= 2 {
-		h.maybeAnswerLocked(r, now)
+		if r.deviceID == "" {
+			h.maybeAnswerLocked(r, now)
+		}
 		h.stopWaitLocked(r)
+	}
+}
+
+// ready 是设备念完来电提示后的通知。这时才记为接通，并让正在等待的网页进入通话。
+func (h *Hub) ready(p *Peer) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if p.Kind != KindDevice {
+		p.Send(Message{Type: TypeError, Reason: "only device can ready"})
+		return
+	}
+	r := h.rooms[h.peerRoom[p]]
+	if r == nil || r.deviceID != p.ID || r.answered || h.webCount(r) == 0 {
+		return
+	}
+	h.maybeAnswerLocked(r, time.Now())
+	for m := range r.members {
+		if m.Kind == KindWeb {
+			m.Send(Message{Type: TypeAnswered, Room: r.id})
+		}
 	}
 }
 

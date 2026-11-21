@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	"nexcall/device/internal/agent"
+	"nexcall/device/internal/announce"
 	"nexcall/device/internal/config"
 	"nexcall/device/internal/gpio"
 	"nexcall/device/internal/rtc"
@@ -42,7 +43,15 @@ func runAgent(ctx context.Context, cfg *config.Config) error {
 	join := func(url, token string) (agent.Media, error) {
 		return rtc.Join(url, token, opts)
 	}
-	a := agent.New(agent.Config{DeviceID: cfg.DeviceID, CallTarget: cfg.CallTarget}, sig, join, panel, volume.New(cfg.VolumeSink, cfg.VolumeSource))
+	var speaker agent.Announcer
+	if cfg.MusicURL != "" {
+		speaker = announce.New(cfg.MusicURL)
+	}
+	a := agent.New(agent.Config{
+		DeviceID:   cfg.DeviceID,
+		CallTarget: cfg.CallTarget,
+		Announce:   speaker,
+	}, sig, join, panel, volume.New(cfg.VolumeSink, cfg.VolumeSource))
 	if cfg.CallStateFile != "" {
 		writeCallState(cfg.CallStateFile, agent.Offline)
 		a.OnState = func(s agent.State) { writeCallState(cfg.CallStateFile, s) }

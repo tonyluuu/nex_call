@@ -663,7 +663,8 @@ function renderCall() {
   const title = current.phase === 'ringing' && current.peerName ? `正在呼叫 ${current.peerName}` : room ? roomLabel(room) : '正在进入…'
   $('call-peer').textContent = title
   $('mini-peer').textContent = title
-  $('call-state').textContent = current.phase === 'active' ? '通话中' : current.phase === 'ringing' ? '等待对方接听' : '正在进入…'
+  const waitingDevice = current.phase === 'ringing' && !!current.room && (current.room.startsWith('device:') || current.room.startsWith('device-'))
+  $('call-state').textContent = current.phase === 'active' ? '通话中' : waitingDevice ? '等待中' : current.phase === 'ringing' ? '等待对方接听' : '正在进入…'
   $('btn-mute').classList.toggle('hidden', current.phase !== 'active')
   $('btn-mute').classList.toggle('active', current.muted)
   $('btn-mute').textContent = current.muted ? '取消静音' : '静音'

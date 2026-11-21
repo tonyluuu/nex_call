@@ -11,6 +11,9 @@
   body { margin: 0; font: 15px/1.5 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif; padding-bottom: 150px; }
   header { padding: 16px 20px 8px; max-width: 760px; margin: 0 auto; }
   h1 { margin: 0; font-size: 20px; }
+  .tabs { display: flex; gap: 8px; margin-top: 12px; }
+  .tabs button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+  body.no-player { padding-bottom: 24px; }
   .muted { color: var(--muted); font-size: 13px; }
   main { padding: 0 20px; max-width: 760px; margin: 0 auto; }
 
@@ -86,6 +89,8 @@
   .tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
   .checks { display: flex; flex-wrap: wrap; gap: 8px 14px; margin: 8px 0; }
   .checks label { display: flex; align-items: center; gap: 6px; }
+  .announce-text { display: block; margin: 8px 0; }
+  .announce-text select { width: 100%; margin-top: 4px; font: inherit; padding: 6px 8px; }
   .level { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
   .level span:first-child { width: 4.5em; }
   .level input { flex: 1; accent-color: var(--accent); }
@@ -100,8 +105,12 @@
 <header>
   <h1>香橙派音乐</h1>
   <div class="muted">声音从香橙派的喇叭播放。NexCall 通话开始时会自动暂停。</div>
+  <nav class="tabs">
+    <button id="tab-music" class="on" type="button">音乐播放</button>
+    <button id="tab-call" type="button">通话设置</button>
+  </nav>
 </header>
-<main>
+<main id="view-music">
   <section class="detail" id="detail" hidden>
     <div class="cover" id="detail-cover"></div>
     <div class="meta">
@@ -126,6 +135,33 @@
       <span><i class="dot" style="background: rgba(128,128,128,.45)"></i>磁盘已用 <b id="st-used"></b> / <b id="st-total"></b></span>
       <span>剩余 <b id="st-free"></b></span>
     </div>
+  </section>
+
+  <div class="error" id="error"></div>
+  <ul id="tracks"></ul>
+  <div class="muted" id="empty" hidden>还没有音乐，先上传一首。</div>
+</main>
+<main id="view-call" hidden>
+  <section class="panel">
+    <h2>通话提示音</h2>
+    <div class="muted">有人打进来时，先播放所选的滴声再接通。</div>
+    <div class="checks">
+      <label><input type="checkbox" id="announce-enabled" checked> 启用来电提示</label>
+    </div>
+    <label class="announce-text">提示音
+      <select id="announce-sound">
+        <option value="single">一声短滴</option>
+        <option value="double">滴滴两声</option>
+        <option value="high">高音短促</option>
+        <option value="low">低音一声</option>
+        <option value="phone">电话铃</option>
+        <option value="triple">三声短滴</option>
+      </select>
+    </label>
+    <div class="tools">
+      <button id="announce-preview" type="button">试听</button>
+    </div>
+    <div class="muted" id="announce-error"></div>
   </section>
 
   <section class="panel">
@@ -179,12 +215,8 @@
     </div>
     <div class="muted" id="aec-note"></div>
   </section>
-
-  <div class="error" id="error"></div>
-  <ul id="tracks"></ul>
-  <div class="muted" id="empty" hidden>还没有音乐，先上传一首。</div>
 </main>
-<footer>
+<footer id="player">
   <div class="seek">
     <span id="time-cur">0:00</span>
     <input type="range" id="seek" min="0" max="0" step="0.1" value="0" aria-label="播放进度" disabled>
@@ -403,6 +435,7 @@ function renderFooter() {
   $('btn-mode').setAttribute('aria-label', '播放模式：' + mode.label)
   if (Date.now() > volumeBusyUntil) showVolume(state.volume)
   renderSeek()
+  syncPlayer()
 }
 
 function render() {
@@ -412,6 +445,7 @@ function render() {
   renderList()
   renderFooter()
   renderAudio()
+  renderAnnounce()
 }
 
 async function refresh() {
@@ -504,10 +538,11 @@ function showLevel(which, value) {
   $('level-' + which + '-text').textContent = value + '%'
 }
 
-function sendLevel(which) {
+function sendLevel(which, beep) {
   levelTimers[which] = null
   const body = {}
   body[which] = Number($('level-' + which).value)
+  if (beep) body.beep = true
   api('/api/levels', body).catch((e) => showError(e.message))
 }
 
@@ -521,11 +556,46 @@ function bindLevel(which) {
   input.onchange = () => {
     levelBusyUntil = Date.now() + 1500
     clearTimeout(levelTimers[which])
-    sendLevel(which)
+    sendLevel(which, which === 'speaker')
   }
 }
 bindLevel('speaker')
 bindLevel('mic')
+
+let announceDirtyUntil = 0
+
+function renderAnnounce() {
+  const ann = state.announce || { enabled: true, sound: 'single' }
+  if (Date.now() <= announceDirtyUntil || document.activeElement === $('announce-sound')) return
+  $('announce-enabled').checked = !!ann.enabled
+  if (ann.sound) $('announce-sound').value = ann.sound
+}
+
+function saveAnnounce() {
+  announceDirtyUntil = Date.now() + 3000
+  $('announce-error').textContent = ''
+  api('/api/announce/settings', {
+    enabled: $('announce-enabled').checked,
+    sound: $('announce-sound').value,
+  }).catch((e) => { $('announce-error').textContent = e.message })
+}
+
+let onCallPage = false
+
+function syncPlayer() {
+  const hide = onCallPage && state.status === 'stopped'
+  $('player').hidden = hide
+  document.body.classList.toggle('no-player', hide)
+}
+
+function showPage(call) {
+  onCallPage = call
+  $('view-music').hidden = call
+  $('view-call').hidden = !call
+  $('tab-music').classList.toggle('on', !call)
+  $('tab-call').classList.toggle('on', call)
+  syncPlayer()
+}
 
 function renderAudio() {
   const rec = state.recording || { active: false, mode: '', startedAt: 0, playing: '' }
@@ -610,6 +680,15 @@ function renderAudio() {
 
 for (const input of document.querySelectorAll('#aec-checks input')) {
   input.onchange = () => { aecDirtyUntil = Date.now() + 20000 }
+}
+$('tab-music').onclick = () => showPage(false)
+$('tab-call').onclick = () => showPage(true)
+$('announce-enabled').onchange = saveAnnounce
+$('announce-sound').onchange = saveAnnounce
+$('announce-preview').onclick = () => {
+  $('announce-error').textContent = ''
+  api('/api/announce/preview', { sound: $('announce-sound').value })
+    .catch((e) => { $('announce-error').textContent = e.message })
 }
 $('rec-start').onclick = () => run(() => api('/api/record/start'))
 $('rec-stop').onclick = () => run(() => api('/api/record/stop'))

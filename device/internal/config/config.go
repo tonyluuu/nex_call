@@ -22,6 +22,8 @@ type Config struct {
 	CallTarget string
 	// CallStateFile 写出 offline / idle / active，供音乐播放器等本机程序读取；空表示不写
 	CallStateFile string
+	// MusicURL 本机音乐服务，接通前用来播放来电提示；空表示不提示
+	MusicURL string
 
 	AudioBackend   string
 	CaptureDevice  string
@@ -107,6 +109,7 @@ func Load(args []string) (*Config, error) {
 	fs.StringVar(&c.CallTarget, "call-target", env("CALL_TARGET", ""), "短按提醒的 Web 用户，空为全部在线用户 [CALL_TARGET]")
 
 	fs.StringVar(&c.CallStateFile, "call-state-file", env("CALL_STATE_FILE", "/run/nexcall/call-state"), "通话状态文件，空为不写 [CALL_STATE_FILE]")
+	fs.StringVar(&c.MusicURL, "music-url", env("MUSIC_URL", "http://127.0.0.1:8090"), "本机音乐服务，接通前播放来电提示；空为不提示 [MUSIC_URL]")
 
 	fs.StringVar(&c.AudioBackend, "audio-backend", env("AUDIO_BACKEND", "auto"), "auto|pulseaudio|alsa|null [AUDIO_BACKEND]")
 	fs.StringVar(&c.CaptureDevice, "capture-device", env("CAPTURE_DEVICE", ""), "采集设备名子串，空为默认 [CAPTURE_DEVICE]")

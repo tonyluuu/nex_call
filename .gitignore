@@ -6,6 +6,7 @@ device/dist/
 *.db-wal
 go.work.sum
 .DS_Store
+__pycache__/
 
 deploy/.env
 deploy/certs/
