@@ -2,6 +2,7 @@ package auth
 
 import (
 	"encoding/base64"
+	"errors"
 	"strconv"
 	"testing"
 	"time"
@@ -41,6 +42,57 @@ func TestDeviceSecret(t *testing.T) {
 	}
 	if !CheckDeviceSecret(hash, secret) || CheckDeviceSecret(hash, secret+"x") {
 		t.Fatal("device secret check wrong")
+	}
+}
+
+func TestShareRoundTrip(t *testing.T) {
+	a, err := SealShare("张三", 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := SealShare("张三", 1, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a == b {
+		t.Fatal("same plaintext produced the same ciphertext")
+	}
+	user, gen, err := OpenShare(a)
+	if err != nil || user != "张三" || gen != 1 {
+		t.Fatalf("open: %q %d %v", user, gen, err)
+	}
+	unlimited, err := SealShare("张三", 2, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := OpenShare(unlimited); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SealShare("张三", 1, -1); !errors.Is(err, ErrInvalidShareDays) {
+		t.Fatalf("negative days: %v", err)
+	}
+	if _, err := SealShare("张三", 0, 1); err == nil {
+		t.Fatal("zero generation accepted")
+	}
+	if _, _, err := OpenShare(a + "x"); err == nil {
+		t.Fatal("tampered token accepted")
+	}
+	if _, _, err := OpenShare("not-a-token"); err == nil {
+		t.Fatal("garbage token accepted")
+	}
+	expired, err := SealShareUntil("张三", 1, time.Now().Unix()-10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := OpenShare(expired); !errors.Is(err, ErrShareExpired) {
+		t.Fatalf("expired: %v", err)
+	}
+	legacy, err := sealPlain([]byte(`{"u":"张三","p":"password123","e":0}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := OpenShare(legacy); err == nil {
+		t.Fatal("legacy token without generation accepted")
 	}
 }
 

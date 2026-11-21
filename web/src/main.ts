@@ -1,6 +1,8 @@
 import './style.css'
 import {
+  createShareLink,
   createUser,
+  setUserPassword,
   deleteUser,
   getCall,
   kick,
@@ -8,6 +10,7 @@ import {
   listUsers,
   loadSession,
   login,
+  loginWithShare,
   me,
   saveSession,
   setDeviceVolume,
@@ -54,6 +57,9 @@ const apiErrorText: Record<string, string> = {
   'user exists': '用户名已存在',
   'invalid username': '用户名不能为空，且不能包含空格或冒号',
   'password must be at least 8 characters': '密码至少 8 位',
+  'invalid share link': '分享链接无效，请输入用户名和密码登录',
+  'share link expired': '分享链接已过期',
+  'invalid share days': '有效天数不正确',
   'cannot delete yourself': '不能删除当前登录的账号',
   'cannot delete admin': '不能删除管理员',
   'device offline': '设备不在线',
@@ -154,6 +160,15 @@ function showVolume(textId: string, v?: number) {
   $(textId.replace(/-text$/, '-gain')).classList.toggle('on', v != null && v > 100)
 }
 
+function volumeButton(d: DeviceStatus) {
+  const vol = document.createElement('button')
+  vol.className = 'compact'
+  vol.textContent = `${d.name}音量设置`
+  vol.disabled = !d.online
+  vol.onclick = () => openVolume(d.id)
+  return vol
+}
+
 function renderAdminDevices() {
   const list = $('admin-devices')
   list.replaceChildren()
@@ -171,15 +186,14 @@ function renderAdminDevices() {
     li.innerHTML = `
       <div class="device-info">
         <span class="dot ${d.online ? (d.busy ? 'busy' : 'on') : ''}"></span>
-        <div><div class="device-name"></div><div class="muted small"></div></div>
+        <div class="device-body">
+          <div class="device-name"></div>
+          <div class="device-meta"><span class="muted small"></span></div>
+        </div>
       </div>`
     li.querySelector('.device-name')!.textContent = d.name
     li.querySelector('.small')!.textContent = `${d.id} · ${state} · 喇叭 ${fmtVol(d.speaker)} · 麦克风 ${fmtVol(d.mic)}`
-    const btn = document.createElement('button')
-    btn.textContent = `${d.name}音量设置`
-    btn.disabled = !d.online
-    btn.onclick = () => openVolume(d.id)
-    li.append(btn)
+    li.querySelector('.device-meta')!.append(volumeButton(d))
     list.append(li)
   }
 }
@@ -354,20 +368,16 @@ function renderDevices() {
     li.innerHTML = `
       <div class="device-info">
         <span class="dot ${d.online ? (d.busy ? 'busy' : 'on') : ''}"></span>
-        <div><div class="device-name"></div><div class="muted small"></div></div>
-      </div>
-      <div class="device-actions"></div>`
+        <div class="device-body">
+          <div class="device-head"><div class="device-name"></div><div class="device-actions"></div></div>
+          <div class="device-meta"><span class="muted small"></span></div>
+        </div>
+      </div>`
     li.querySelector('.device-name')!.textContent = d.name
     const volume = d.online && (d.speaker != null || d.mic != null) ? ` · 喇叭 ${fmtVol(d.speaker)} · 麦克风 ${fmtVol(d.mic)}` : ''
     li.querySelector('.small')!.textContent = `${d.id} · ${state}${volume}`
+    if (isAdmin()) li.querySelector('.device-meta')!.append(volumeButton(d))
     const actions = li.querySelector('.device-actions')!
-    if (isAdmin()) {
-      const vol = document.createElement('button')
-      vol.textContent = `${d.name}音量设置`
-      vol.disabled = !d.online
-      vol.onclick = () => openVolume(d.id)
-      actions.append(vol)
-    }
     const btn = document.createElement('button')
     btn.className = 'primary'
     btn.textContent = d.busy ? '加入' : '进入'
@@ -491,15 +501,14 @@ function fmtDuration(ms: number) {
 // 服务端只支持 limit，一次取最近 MAX_CALLS 条，在页面上分页
 const MAX_CALLS = 500
 let callCache: CallRecord[] = []
-const callPage: Record<string, number> = { 'call-list': 0, 'admin-call-list': 0 }
-const pageSize: Record<string, number> = { 'call-list': 10, 'admin-call-list': 10 }
+const callPage: Record<string, number> = { 'call-list': 0 }
+const pageSize: Record<string, number> = { 'call-list': 10 }
 
 async function refreshCalls() {
   if (!session) return
   try {
     callCache = await listCalls(session.token, MAX_CALLS)
-    renderCallPage('call-list', false)
-    if (isAdmin()) renderCallPage('admin-call-list', true)
+    renderCallPage('call-list', isAdmin())
   } catch (e) {
     if (e instanceof UnauthorizedError) logout()
   }
@@ -871,8 +880,12 @@ function startSession(s: Session) {
   session = s
   saveSession(s)
   $('user-name').textContent = s.role === 'admin' ? `${s.username} · 管理员` : s.username
+  const historyLabel = s.role === 'admin' ? '通话记录（全部）' : '通话记录'
+  $('tab-history').textContent = historyLabel
+  $('history-title').textContent = historyLabel
   $('tab-admin').classList.toggle('hidden', s.role !== 'admin')
   show('main-view')
+  showTab('call')
   signal?.stop()
   signal = new SignalClient(s.token, onSignal, setConn, async () => {
     try {
@@ -901,12 +914,14 @@ function logout() {
   show('login-view')
 }
 
-function showTab(admin: boolean) {
-  $('call-panel').classList.toggle('hidden', admin)
-  $('admin-panel').classList.toggle('hidden', !admin)
-  $('tab-call').classList.toggle('on', !admin)
-  $('tab-admin').classList.toggle('on', admin)
-  if (admin) void refreshUsers()
+function showTab(tab: 'call' | 'history' | 'admin') {
+  $('call-panel').classList.toggle('hidden', tab !== 'call')
+  $('history-panel').classList.toggle('hidden', tab !== 'history')
+  $('admin-panel').classList.toggle('hidden', tab !== 'admin')
+  $('tab-call').classList.toggle('on', tab === 'call')
+  $('tab-history').classList.toggle('on', tab === 'history')
+  $('tab-admin').classList.toggle('on', tab === 'admin')
+  if (tab === 'admin') void refreshUsers()
 }
 
 $('login-form').addEventListener('submit', async (ev) => {
@@ -923,9 +938,9 @@ $('login-form').addEventListener('submit', async (ev) => {
 
 $('logout').onclick = logout
 $('refresh-calls').onclick = () => void refreshCalls()
-$('refresh-admin-calls').onclick = () => void refreshCalls()
-$('tab-call').onclick = () => showTab(false)
-$('tab-admin').onclick = () => showTab(true)
+$('tab-call').onclick = () => showTab('call')
+$('tab-history').onclick = () => showTab('history')
+$('tab-admin').onclick = () => showTab('admin')
 $('btn-hangup').onclick = hangup
 $('mini-hangup').onclick = hangup
 $('btn-minimize').onclick = () => {
@@ -949,26 +964,140 @@ $('btn-audio').onclick = async () => {
   await current?.media?.startAudio()
   $('btn-audio').classList.add('hidden')
 }
-$('user-add-open').onclick = () => {
+let shareUser = ''
+
+function shareURL(username: string, share: string) {
+  const root = import.meta.env.BASE_URL.endsWith('/') ? import.meta.env.BASE_URL : `${import.meta.env.BASE_URL}/`
+  const hash = `u=${encodeURIComponent(username)}&s=${encodeURIComponent(share)}`
+  return `${location.origin}${root}#${hash}`
+}
+
+function shareDays() {
+  const raw = $<HTMLInputElement>('user-share-days').value.trim()
+  if (!/^\d+$/.test(raw)) return null
+  return Number(raw)
+}
+
+function showShareLink(share: string) {
+  $<HTMLInputElement>('user-share-link').value = shareURL(shareUser, share)
+  $('user-share-link-label').classList.remove('hidden')
+  $('user-share-copy').classList.remove('hidden')
+  $<HTMLButtonElement>('user-share-copy').textContent = '复制'
+}
+
+function showUserForm() {
   $('user-error').textContent = ''
   ;($('user-form') as HTMLFormElement).reset()
+  $('user-form').classList.remove('hidden')
+  $('user-share').classList.add('hidden')
   $('user-add-dialog').classList.remove('hidden')
 }
+
+function closeUserShare() {
+  shareUser = ''
+  $('user-add-dialog').classList.add('hidden')
+  $('user-share').classList.add('hidden')
+  $('user-form').classList.remove('hidden')
+}
+
+function openSharePanel(username: string, share: string, created: boolean) {
+  shareUser = username
+  $('user-share-title').textContent = created ? '用户已创建' : '分享免密登录链接'
+  $<HTMLInputElement>('user-share-days').value = '1'
+  $('user-share-error').textContent = ''
+  $('user-form').classList.add('hidden')
+  $('user-share').classList.remove('hidden')
+  $('user-add-dialog').classList.remove('hidden')
+  if (share) {
+    showShareLink(share)
+    return
+  }
+  $<HTMLInputElement>('user-share-link').value = ''
+  $('user-share-link-label').classList.add('hidden')
+  $('user-share-copy').classList.add('hidden')
+  void issueShare()
+}
+
+async function issueShare() {
+  if (!session || !shareUser) return
+  const days = shareDays()
+  if (days === null) {
+    $('user-share-error').textContent = '有效天数不正确'
+    return
+  }
+  $('user-share-error').textContent = ''
+  try {
+    const created = await createShareLink(session.token, shareUser, days)
+    showShareLink(created.share)
+  } catch (e) {
+    if (e instanceof UnauthorizedError) logout()
+    else $('user-share-error').textContent = explain(e)
+  }
+}
+
+$('user-add-open').onclick = showUserForm
 $('user-add-cancel').onclick = () => $('user-add-dialog').classList.add('hidden')
 $('user-form').addEventListener('submit', async (ev) => {
   ev.preventDefault()
   if (!session) return
   const form = ev.target as HTMLFormElement
   const data = new FormData(form)
+  const username = String(data.get('username'))
   $('user-error').textContent = ''
   try {
-    await createUser(session.token, String(data.get('username')), String(data.get('password')))
+    const created = await createUser(session.token, username, String(data.get('password')))
     form.reset()
-    $('user-add-dialog').classList.add('hidden')
+    openSharePanel(created.username, created.share, true)
     await refreshUsers()
   } catch (e) {
     if (e instanceof UnauthorizedError) logout()
     else $('user-error').textContent = explain(e)
+  }
+})
+$('user-share-close').onclick = closeUserShare
+$('user-share-days').addEventListener('change', () => {
+  if (shareUser) void issueShare()
+})
+$('user-share-copy').onclick = async () => {
+  const input = $<HTMLInputElement>('user-share-link')
+  try {
+    await navigator.clipboard.writeText(input.value)
+    $('user-share-error').textContent = ''
+    $<HTMLButtonElement>('user-share-copy').textContent = '已复制'
+  } catch {
+    input.focus()
+    input.select()
+    $('user-share-error').textContent = '复制失败，请手动复制'
+  }
+}
+$('user-action-share').onclick = () => {
+  const username = actionUser
+  if (!username) return
+  closeUserAction()
+  openSharePanel(username, '', false)
+}
+$('user-action-password').onclick = () => {
+  const username = actionUser
+  if (!username) return
+  closeUserAction()
+  $('user-password-title').textContent = `修改 ${username} 的密码`
+  $('user-password-error').textContent = ''
+  ;($('user-password-form') as HTMLFormElement).reset()
+  $('user-password-dialog').classList.remove('hidden')
+}
+$('user-password-cancel').onclick = () => $('user-password-dialog').classList.add('hidden')
+$('user-password-form').addEventListener('submit', async (ev) => {
+  ev.preventDefault()
+  if (!session || !actionUser) return
+  const password = String(new FormData(ev.target as HTMLFormElement).get('password'))
+  $('user-password-error').textContent = ''
+  try {
+    await setUserPassword(session.token, actionUser, password)
+    $('user-password-dialog').classList.add('hidden')
+    banner('密码已更新')
+  } catch (e) {
+    if (e instanceof UnauthorizedError) logout()
+    else $('user-password-error').textContent = explain(e)
   }
 })
 $('user-action-close').onclick = closeUserAction
@@ -1032,8 +1161,26 @@ if (!window.isSecureContext) {
   banner('当前页面不是 HTTPS，浏览器将禁止使用麦克风。请通过 https:// 访问。', true)
 }
 
+function takeShareLogin() {
+  const query = new URLSearchParams(location.hash.replace(/^#/, ''))
+  const username = query.get('u')
+  const share = query.get('s')
+  if (!username || !share) return null
+  history.replaceState(null, '', location.pathname + location.search)
+  return { username, share }
+}
+
+const shareLogin = takeShareLogin()
 const saved = loadSession()
-if (saved) {
+if (shareLogin) {
+  show('login-view')
+  loginWithShare(shareLogin.username, shareLogin.share)
+    .then(startSession)
+    .catch((e) => {
+      show('login-view')
+      $('login-error').textContent = e instanceof UnauthorizedError ? '用户名或密码错误' : explain(e)
+    })
+} else if (saved) {
   me(saved.token)
     .then((info) => startSession({ ...saved, username: info.username, livekitUrl: info.livekitUrl, role: info.role || 'user' }))
     .catch((e) => {

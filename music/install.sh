@@ -11,6 +11,14 @@ if ! command -v mpg123 >/dev/null 2>&1; then
   echo "==> 安装 mpg123"
   sudo apt-get install -y mpg123
 fi
+if ! command -v parec >/dev/null 2>&1 || ! command -v paplay >/dev/null 2>&1; then
+  echo "==> 安装 pulseaudio-utils（录音和播放）"
+  sudo apt-get install -y pulseaudio-utils
+fi
+if ! command -v speaker-test >/dev/null 2>&1; then
+  echo "==> 安装 alsa-utils（测试音）"
+  sudo apt-get install -y alsa-utils
+fi
 if ! python3 -c 'import flask' >/dev/null 2>&1; then
   echo "==> 安装 Flask"
   sudo apt-get install -y python3-flask
@@ -21,10 +29,12 @@ if ! python3 -c 'import mutagen' >/dev/null 2>&1; then
 fi
 
 echo "==> 复制程序到 /opt/nexcall-music"
-sudo mkdir -p /opt/nexcall-music/templates /var/lib/nexcall-music
+sudo mkdir -p /opt/nexcall-music/templates /var/lib/nexcall-music/recordings
 sudo install -m 644 "$HERE/app.py" /opt/nexcall-music/app.py
+sudo install -m 644 "$HERE/levels.py" /opt/nexcall-music/levels.py
+sudo install -m 644 "$HERE/record.py" /opt/nexcall-music/record.py
 sudo install -m 644 "$HERE/templates/index.html" /opt/nexcall-music/templates/index.html
-sudo chown "$RUN_USER" /var/lib/nexcall-music
+sudo chown -R "$RUN_USER" /var/lib/nexcall-music
 
 sed -e "s/^User=.*/User=$RUN_USER/" \
     -e "s#/run/user/1000#/run/user/$RUN_UID#g" \

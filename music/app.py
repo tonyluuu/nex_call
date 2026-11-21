@@ -3,6 +3,7 @@
 
 NexCall 通话开始时自动暂停，挂断后不自动恢复。需兼容 Ubuntu 18.04 的 Python 3.6。
 """
+import glob
 import json
 import logging
 import os
@@ -12,7 +13,20 @@ import subprocess
 import threading
 import time
 
-from flask import Flask, Response, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request, send_file
+
+from levels import (
+    AEC_KEYS,
+    Pactl,
+    echo_masters,
+    format_aec,
+    parse_aec,
+    parse_list,
+    pactl_run,
+    rewrite_echo_line,
+    supported_aec_keys,
+)
+from record import AEC_SINK, AEC_SOURCE, RAW_SOURCE, MicMeter, RecordError, Recorder, source_names
 
 try:
     from mutagen.mp3 import MP3
@@ -20,6 +34,8 @@ except ImportError:  # 没装 python3-mutagen 时只显示文件名和大小
     MP3 = None
 
 MUSIC_DIR = os.environ.get("MUSIC_DIR", "/var/lib/nexcall-music")
+REC_DIR = os.path.join(MUSIC_DIR, "recordings")
+PA_CONFIG = os.path.expanduser("~/.config/pulse/default.pa")
 MUSIC_PORT = int(os.environ.get("MUSIC_PORT", "8090"))
 CALL_STATE_FILE = os.environ.get("CALL_STATE_FILE", "/run/nexcall/call-state")
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "50"))
@@ -269,6 +285,16 @@ class Player:
                 self.call_paused = True
                 log.info("call started, music paused")
 
+    def pause_held(self):
+        """录音或测试开始前暂停，结束后不自动继续。"""
+        with self.lock:
+            if self.status != "playing":
+                return
+            self._send("PAUSE")
+            self._freeze_position()
+            self.status = "paused"
+            self.call_paused = False
+
     def set_volume(self, volume):
         with self.lock:
             self.volume = clamp_volume(volume)
@@ -334,6 +360,7 @@ def watch_calls():
         state = read_call_state()
         if state == "active" and last != "active":
             player.pause_for_call()
+            recorder.stop()
         last = state
 
 
@@ -470,6 +497,20 @@ def state():
     data["tracks"] = [i for i in map(track_info, list_tracks()) if i]
     data["call"] = read_call_state()
     data["storage"] = storage_usage(data["tracks"])
+    data["recording"] = recorder.status()
+    data["recordings"] = recorder.items()
+    flags, ready, aec_error = current_aec()
+    data["aec"] = {key: flags[key] for key in AEC_KEYS}
+    data["aecSupported"] = sorted(aec_supported())
+    data["aecReady"] = ready
+    data["aecError"] = aec_error
+    try:
+        speaker, mic = Pactl().get()
+        data["levels"] = {"speaker": speaker, "mic": mic}
+        data["levelsError"] = ""
+    except (RuntimeError, ValueError) as exc:
+        data["levels"] = None
+        data["levelsError"] = str(exc)
     return jsonify(data)
 
 
@@ -481,6 +522,230 @@ def storage_usage(tracks):
     except OSError:
         pass
     return usage
+
+
+def list_pulse_sources():
+    try:
+        return source_names(pactl_run(["list", "short", "sources"]))
+    except (RuntimeError, OSError) as exc:
+        log.warning("list sources: %s", exc)
+        return []
+
+
+recorder = Recorder(REC_DIR, lambda: read_call_state() == "active", player.pause_held, list_pulse_sources)
+
+
+def card_source():
+    """声卡原始输入。usb-mic-mono 的上游就是 USB 采集，还没进降噪。"""
+    nodes = parse_list(pactl_run(["list", "sources"]))
+    for node in nodes:
+        if node["name"] == RAW_SOURCE and node["master"]:
+            return node["master"]
+    for node in nodes:
+        name = node["name"]
+        if "alsa_input" in name and "usb" in name.lower() and "monitor" not in name:
+            return name
+    return ""
+
+
+meter = MicMeter(card_source)
+
+_aec_supported = None
+
+
+def aec_supported():
+    """PulseAudio 11 的 WebRTC 没有 delay_agnostic，写进参数会导致模块加载失败。"""
+    global _aec_supported
+    if _aec_supported is not None:
+        return _aec_supported
+    paths = glob.glob("/usr/lib/pulse-*/modules/libwebrtc-util.so")
+    if not paths:
+        _aec_supported = set(AEC_KEYS)
+        return _aec_supported
+    try:
+        text = subprocess.check_output(
+            ["strings", paths[0]], universal_newlines=True, timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        _aec_supported = set(AEC_KEYS) - {"delay_agnostic"}
+        return _aec_supported
+    _aec_supported = supported_aec_keys(text)
+    return _aec_supported
+
+
+def current_aec():
+    """返回 (开关, 模块是否已加载, 错误信息)。"""
+    try:
+        text = pactl_run(["list", "modules"])
+    except (RuntimeError, OSError) as exc:
+        return parse_aec(""), False, str(exc)
+    argument = ""
+    seen = False
+    for line in text.splitlines():
+        trim = line.strip()
+        if trim.startswith("Name:") and trim.endswith("module-echo-cancel"):
+            seen = True
+            continue
+        if seen and trim.startswith("Argument:"):
+            argument = trim[len("Argument:"):].strip()
+            break
+        if seen and (trim.startswith("Name:") or trim.startswith("Module #")):
+            break
+    if not argument:
+        return parse_aec(""), False, ""
+    return parse_aec(argument), True, ""
+
+
+def module_masters():
+    try:
+        text = pactl_run(["list", "modules"])
+    except (RuntimeError, OSError):
+        text = ""
+    argument = ""
+    seen = False
+    for line in text.splitlines():
+        trim = line.strip()
+        if trim.startswith("Name:") and trim.endswith("module-echo-cancel"):
+            seen = True
+            continue
+        if seen and trim.startswith("Argument:"):
+            argument = trim[len("Argument:"):].strip()
+            break
+    sink, source = echo_masters(argument)
+    if sink and source:
+        return sink, source
+    try:
+        sinks, sources, _, _ = Pactl().snapshot()
+    except (RuntimeError, OSError, ValueError):
+        return sink, source
+    if not sink:
+        for node in sinks:
+            if node["name"] == AEC_SINK:
+                sink = node["master"]
+    if not source:
+        for node in sources:
+            if node["name"] == AEC_SOURCE:
+                source = node["master"]
+    return sink, source
+
+
+def _rebind_call_audio():
+    """重载回声消除后，把通话进程拉回 echo-cancel，避免它落到板载麦克风。"""
+    jobs = (
+        ("source-outputs", "Source Output #", "move-source-output", AEC_SOURCE),
+        ("sink-inputs", "Sink Input #", "move-sink-input", AEC_SINK),
+    )
+    for kind, header, verb, target in jobs:
+        try:
+            text = pactl_run(["list", kind])
+        except (RuntimeError, OSError) as exc:
+            log.warning("list %s: %s", kind, exc)
+            continue
+        index = None
+        app = ""
+
+        def move():
+            if app != "device-agent" or not index:
+                return
+            try:
+                pactl_run([verb, index, target])
+            except (RuntimeError, OSError) as exc:
+                log.warning("%s %s: %s", verb, index, exc)
+
+        for line in text.splitlines():
+            trim = line.strip()
+            if trim.startswith(header):
+                move()
+                index = trim[len(header):].strip()
+                app = ""
+            elif "application.name" in trim and "=" in trim:
+                app = trim.split("=", 1)[1].strip().strip('"')
+        move()
+
+
+def apply_aec(flags):
+    if read_call_state() == "active":
+        raise RecordError("通话中不能修改降噪")
+    sink, source = module_masters()
+    if not source:
+        raise RecordError("找不到 %s，无法重新加载降噪" % RAW_SOURCE)
+    args = format_aec(flags, aec_supported())
+    previous, ready, _ = current_aec()
+    load = [
+        "load-module", "module-echo-cancel",
+        "use_master_format=1", "aec_method=webrtc",
+        "aec_args=\"%s\"" % args,
+        "source_name=%s" % AEC_SOURCE,
+        "sink_name=%s" % AEC_SINK,
+        "source_master=%s" % source,
+    ]
+    if sink:
+        load.append("sink_master=%s" % sink)
+    try:
+        pactl_run(["unload-module", "module-echo-cancel"])
+    except (RuntimeError, OSError) as exc:
+        log.warning("unload echo-cancel: %s", exc)
+    try:
+        pactl_run(load)
+    except (RuntimeError, OSError):
+        if ready:
+            restore = list(load)
+            restore[4] = "aec_args=\"%s\"" % format_aec(previous, aec_supported())
+            try:
+                pactl_run(restore)
+                pactl_run(["set-default-source", AEC_SOURCE])
+                pactl_run(["set-default-sink", AEC_SINK])
+                _rebind_call_audio()
+                meter.ensure_source()
+            except (RuntimeError, OSError) as exc:
+                log.warning("restore echo-cancel: %s", exc)
+        raise
+    try:
+        pactl_run(["set-default-source", AEC_SOURCE])
+        pactl_run(["set-default-sink", AEC_SINK])
+    except (RuntimeError, OSError) as exc:
+        log.warning("reset default devices: %s", exc)
+    _rebind_call_audio()
+    meter.ensure_source()
+    return _save_aec_config(args, sink, source)
+
+
+def _save_aec_config(args, sink, source):
+    try:
+        with open(PA_CONFIG, encoding="utf-8") as handle:
+            text = handle.read()
+    except OSError:
+        return "已生效，但找不到开机配置，重启后会恢复原来的设置"
+    updated = rewrite_echo_line(text, args, sink, source)
+    if updated is None:
+        return "已生效，但开机配置里没有回声消除那一行，重启后会恢复原来的设置"
+    tmp = PA_CONFIG + ".tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as handle:
+            handle.write(updated)
+        os.replace(tmp, PA_CONFIG)
+    except OSError as exc:
+        log.warning("write pulse config: %s", exc)
+        return "已生效，但写不了开机配置，重启后会恢复原来的设置"
+    return ""
+
+
+def _wav_response(path, name):
+    kwargs = {"mimetype": "audio/wav", "as_attachment": True}
+    if "download_name" in send_file.__code__.co_varnames:
+        kwargs["download_name"] = name
+    else:
+        kwargs["attachment_filename"] = name
+    return send_file(path, **kwargs)
+
+
+def _audio_call(fn):
+    try:
+        return fn()
+    except RecordError as exc:
+        return jsonify(error=str(exc)), 400
+    except (RuntimeError, ValueError, OSError) as exc:
+        return jsonify(error=str(exc)), 500
 
 
 @app.get("/api/cover")
@@ -595,6 +860,96 @@ def stop():
     return jsonify(player.snapshot())
 
 
+@app.get("/api/mic")
+def mic_level():
+    return jsonify(meter.snapshot())
+
+
+@app.post("/api/record/start")
+def record_start():
+    def run():
+        recorder.start()
+        return jsonify(recorder.status())
+    return _audio_call(run)
+
+
+@app.post("/api/record/stop")
+def record_stop():
+    recorder.stop()
+    return jsonify(recorder.status())
+
+
+@app.post("/api/record/test")
+def record_test():
+    def run():
+        names = recorder.test()
+        return jsonify(saved=names, recordings=recorder.items())
+    return _audio_call(run)
+
+
+@app.post("/api/recordings/play")
+def recording_play():
+    name = (request.get_json(silent=True) or {}).get("name", "")
+
+    def run():
+        recorder.play(name)
+        return jsonify(recorder.status())
+    return _audio_call(run)
+
+
+@app.post("/api/recordings/stop")
+def recording_stop_play():
+    recorder.stop_play()
+    return jsonify(recorder.status())
+
+
+@app.post("/api/recordings/delete")
+def recording_delete():
+    name = (request.get_json(silent=True) or {}).get("name", "")
+
+    def run():
+        recorder.delete(name)
+        return jsonify(recordings=recorder.items())
+    return _audio_call(run)
+
+
+@app.get("/api/recordings/<name>")
+def recording_download(name):
+    path = recorder._existing(name)
+    if path is None:
+        return jsonify(error="找不到录音"), 404
+    return _wav_response(path, name)
+
+
+@app.post("/api/levels")
+def levels():
+    body = request.get_json(silent=True) or {}
+    if "speaker" not in body and "mic" not in body:
+        return jsonify(error="需要 speaker 或 mic"), 400
+
+    def run():
+        speaker = body["speaker"] if "speaker" in body else None
+        mic = body["mic"] if "mic" in body else None
+        got_speaker, got_mic = Pactl().set(speaker, mic)
+        return jsonify(speaker=got_speaker, mic=got_mic)
+    return _audio_call(run)
+
+
+@app.post("/api/aec")
+def aec():
+    body = request.get_json(silent=True) or {}
+
+    def run():
+        flags, _, _ = current_aec()
+        for key in AEC_KEYS:
+            if key in body:
+                flags[key] = bool(body[key])
+        warning = apply_aec(flags)
+        applied, ready, err = current_aec()
+        return jsonify(aec={key: applied[key] for key in AEC_KEYS}, aecReady=ready, aecError=err, warning=warning)
+    return _audio_call(run)
+
+
 @app.errorhandler(413)
 def too_large(_):
     return jsonify(error="文件超过 %d MB" % MAX_UPLOAD_MB), 413
@@ -603,6 +958,7 @@ def too_large(_):
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     os.makedirs(MUSIC_DIR, exist_ok=True)
+    os.makedirs(REC_DIR, exist_ok=True)
     threading.Thread(target=watch_calls, daemon=True).start()
     log.info("music player on :%d, dir %s", MUSIC_PORT, MUSIC_DIR)
     app.run(host="0.0.0.0", port=MUSIC_PORT, threaded=True)

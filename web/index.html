@@ -39,6 +39,7 @@
           </div>
           <nav class="tabs">
             <button id="tab-call" class="on" type="button">通话</button>
+            <button id="tab-history" type="button">通话记录</button>
             <button id="tab-admin" class="hidden" type="button">管理</button>
           </nav>
         </header>
@@ -56,8 +57,11 @@
             <h2>进行中的通话</h2>
             <div class="block-body"><ul id="room-list" class="devices"></ul></div>
           </section>
+        </main>
+
+        <main id="history-panel" class="hidden">
           <section class="block">
-            <h2>通话记录 <button id="refresh-calls" type="button">刷新</button></h2>
+            <h2><span id="history-title">通话记录</span> <button id="refresh-calls" type="button">刷新</button></h2>
             <div class="block-body">
               <table class="calls">
                 <thead><tr><th>时间</th><th>主叫</th><th>被叫</th><th>时长</th><th>结果</th></tr></thead>
@@ -85,16 +89,6 @@
           <section class="block">
             <h2>房间</h2>
             <div class="block-body"><ul id="admin-rooms" class="devices"></ul></div>
-          </section>
-          <section class="block">
-            <h2>全部通话 <button id="refresh-admin-calls" type="button">刷新</button></h2>
-            <div class="block-body">
-              <table class="calls">
-                <thead><tr><th>时间</th><th>主叫</th><th>被叫</th><th>时长</th><th>结果</th></tr></thead>
-                <tbody id="admin-call-list"></tbody>
-              </table>
-              <div id="admin-call-list-pager" class="pager hidden"></div>
-            </div>
           </section>
         </main>
       </section>
@@ -160,21 +154,47 @@
           <div class="call-peer">添加用户</div>
           <label>用户名<input name="username" autocomplete="off" required /></label>
           <label>密码<input name="password" type="password" autocomplete="new-password" required minlength="8" /></label>
+          <p class="muted small">密码至少 8 位</p>
           <p id="user-error" class="error"></p>
           <div class="dialog-actions">
             <button id="user-add-cancel" type="button">取消</button>
             <button class="primary" type="submit">添加</button>
           </div>
         </form>
+        <div id="user-share" class="dialog-card hidden">
+          <div id="user-share-title" class="call-peer">用户已创建</div>
+          <label>有效天数<input id="user-share-days" type="number" min="0" step="1" value="1" /></label>
+          <p class="muted small">默认 1 天，填 0 表示不限制。再次签发后，旧链接失效。</p>
+          <label id="user-share-link-label">分享链接<input id="user-share-link" readonly /></label>
+          <p class="muted small">对方打开后自动登录。用户名是明文。</p>
+          <p id="user-share-error" class="error"></p>
+          <div class="dialog-actions">
+            <button id="user-share-close" type="button">关闭</button>
+            <button id="user-share-copy" class="primary" type="button">复制</button>
+          </div>
+        </div>
       </div>
       <div id="user-action-dialog" class="overlay hidden">
         <div class="dialog-card">
           <div id="user-action-title" class="call-peer"></div>
           <div class="dialog-actions">
+            <button id="user-action-share" type="button">分享免密登录链接</button>
+            <button id="user-action-password" type="button">修改密码</button>
             <button id="user-action-delete" class="danger" type="button">删除</button>
             <button id="user-action-close" type="button">取消</button>
           </div>
         </div>
+      </div>
+      <div id="user-password-dialog" class="overlay hidden">
+        <form id="user-password-form" class="dialog-card">
+          <div id="user-password-title" class="call-peer">修改密码</div>
+          <label>新密码<input name="password" type="password" autocomplete="new-password" required minlength="8" /></label>
+          <p id="user-password-error" class="error"></p>
+          <div class="dialog-actions">
+            <button id="user-password-cancel" type="button">取消</button>
+            <button class="primary" type="submit">保存</button>
+          </div>
+        </form>
       </div>
       <div id="user-confirm-dialog" class="overlay hidden">
         <div class="dialog-card">

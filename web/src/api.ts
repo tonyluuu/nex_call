@@ -91,8 +91,8 @@ async function request<T>(path: string, init: RequestInit = {}, token?: string):
   if (token) headers.set('Authorization', `Bearer ${token}`)
   if (init.body) headers.set('Content-Type', 'application/json')
   const resp = await fetch(apiPath(path), { ...init, headers })
-  if (resp.status === 401) throw new UnauthorizedError('unauthorized')
   const data = await resp.json().catch(() => ({}))
+  if (resp.status === 401) throw new UnauthorizedError(data.error ?? 'unauthorized')
   if (!resp.ok) throw new Error(data.error ?? `HTTP ${resp.status}`)
   return data as T
 }
@@ -125,10 +125,31 @@ export function listUsers(token: string) {
 }
 
 export function createUser(token: string, username: string, password: string) {
-  return request<UserAccount>('/api/admin/users', {
+  return request<UserAccount & { share: string }>('/api/admin/users', {
     method: 'POST',
     body: JSON.stringify({ username, password }),
   }, token)
+}
+
+export function createShareLink(token: string, username: string, days: number) {
+  return request<{ share: string }>(`/api/admin/users/${encodeURIComponent(username)}/share`, {
+    method: 'POST',
+    body: JSON.stringify({ days }),
+  }, token)
+}
+
+export function setUserPassword(token: string, username: string, password: string) {
+  return request<{ ok: string }>(`/api/admin/users/${encodeURIComponent(username)}/password`, {
+    method: 'POST',
+    body: JSON.stringify({ password }),
+  }, token)
+}
+
+export function loginWithShare(username: string, share: string) {
+  return request<Session>('/api/login-link', {
+    method: 'POST',
+    body: JSON.stringify({ username, share }),
+  })
 }
 
 export function deleteUser(token: string, username: string) {

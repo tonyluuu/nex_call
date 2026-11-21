@@ -60,6 +60,7 @@
   button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
   button.danger { color: var(--danger); }
   button:disabled { opacity: .4; cursor: default; }
+  a.button { display: inline-block; border: 1px solid var(--line); border-radius: 8px; padding: 6px 14px; color: inherit; text-decoration: none; }
 
   footer { position: fixed; left: 0; right: 0; bottom: 0; padding: 8px 20px 10px; border-top: 1px solid var(--line); background: Canvas; }
   .seek { display: flex; align-items: center; gap: 10px; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted); }
@@ -76,7 +77,23 @@
   .volume { display: flex; align-items: center; gap: 6px; }
   .volume input { width: 110px; accent-color: var(--accent); }
   .volume span { width: 3em; text-align: right; font-variant-numeric: tabular-nums; }
+  .volume span:first-child { width: auto; text-align: left; }
   .error { color: var(--danger); font-size: 13px; min-height: 1.5em; }
+
+  .panel { border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin: 12px 0; }
+  .panel h2 { margin: 0 0 8px; font-size: 16px; }
+  .panel + .panel { margin-top: 0; }
+  .tools { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .checks { display: flex; flex-wrap: wrap; gap: 8px 14px; margin: 8px 0; }
+  .checks label { display: flex; align-items: center; gap: 6px; }
+  .level { display: flex; align-items: center; gap: 8px; margin: 8px 0; }
+  .level span:first-child { width: 4.5em; }
+  .level input { flex: 1; accent-color: var(--accent); }
+  .level b { width: 3.2em; text-align: right; font-variant-numeric: tabular-nums; }
+  .rec-time, .rec-clock { font-variant-numeric: tabular-nums; }
+  .meter { height: 12px; border-radius: 6px; background: var(--soft); overflow: hidden; margin: 8px 0; }
+  .meter span { display: block; height: 100%; width: 0; background: var(--muted); }
+  .meter.hot span { background: #2a9d4a; }
 </style>
 </head>
 <body>
@@ -111,6 +128,58 @@
     </div>
   </section>
 
+  <section class="panel">
+    <h2>设备音量</h2>
+    <div class="muted">0–100% 是硬件音量，超过 100% 是软件增益。和通话页调的是同一组。</div>
+    <div class="level">
+      <span>喇叭</span>
+      <input type="range" id="level-speaker" min="0" max="200" step="5" value="100" aria-label="喇叭音量">
+      <b id="level-speaker-text">100%</b>
+    </div>
+    <div class="level">
+      <span>麦克风</span>
+      <input type="range" id="level-mic" min="0" max="200" step="5" value="100" aria-label="麦克风音量">
+      <b id="level-mic-text">100%</b>
+    </div>
+    <div class="muted" id="level-error"></div>
+  </section>
+
+  <section class="panel">
+    <h2>麦克风检测</h2>
+    <div class="muted">看的是 USB 声卡自己送来的声音，还没进降噪。条在动，就是声卡收到了采样。</div>
+    <div class="meter" id="mic-meter-box"><span id="mic-meter"></span></div>
+    <div class="muted" id="mic-text">正在检测…</div>
+  </section>
+
+  <section class="panel">
+    <h2>录音</h2>
+    <div class="muted">录的是通话用的那一路麦克风，两只咪头已经混成单声道。最长 3 分钟，通话中不能录。</div>
+    <div class="tools">
+      <button id="rec-start" class="primary" type="button">开始录音</button>
+      <button id="rec-stop" type="button" hidden>停止</button>
+      <span class="rec-time" id="rec-time"></span>
+    </div>
+    <ul id="recordings"></ul>
+    <div class="muted" id="rec-empty">还没有录音。</div>
+  </section>
+
+  <section class="panel">
+    <h2>降噪</h2>
+    <div class="muted">处理前是两只咪头混合后、还没进算法的声音；处理后是同一路经过当前设置的结果。这些开关也会用于之后的通话。这套系统只有开关，没有降噪强度。</div>
+    <div class="checks" id="aec-checks">
+      <label><input type="checkbox" data-aec="noise_suppression">降噪</label>
+      <label><input type="checkbox" data-aec="high_pass_filter">高通滤波</label>
+      <label><input type="checkbox" data-aec="extended_filter">扩展滤波器</label>
+      <label><input type="checkbox" data-aec="digital_gain_control">数字增益</label>
+      <label><input type="checkbox" data-aec="delay_agnostic">延迟自适应</label>
+    </div>
+    <div class="tools">
+      <button id="aec-apply" type="button">应用</button>
+      <button id="aec-test" class="primary" type="button">降噪测试</button>
+    </div>
+    <div class="muted" id="aec-note"></div>
+  </section>
+
   <div class="error" id="error"></div>
   <ul id="tracks"></ul>
   <div class="muted" id="empty" hidden>还没有音乐，先上传一首。</div>
@@ -135,8 +204,8 @@
       <button id="btn-mode" class="mode"></button>
     </div>
     <div class="volume">
-      <span aria-hidden="true">🔊</span>
-      <input type="range" id="volume" min="0" max="100" step="1" value="100" aria-label="音量">
+      <span>播放器</span>
+      <input type="range" id="volume" min="0" max="100" step="1" value="100" aria-label="播放器音量">
       <span id="volume-text">100%</span>
     </div>
   </div>
@@ -342,6 +411,7 @@ function render() {
   renderStorage()
   renderList()
   renderFooter()
+  renderAudio()
 }
 
 async function refresh() {
@@ -424,6 +494,175 @@ $('volume').onchange = () => {
   clearTimeout(volumeTimer)
   sendVolume()
 }
+
+let levelBusyUntil = 0
+let aecDirtyUntil = 0
+const levelTimers = {}
+
+function showLevel(which, value) {
+  $('level-' + which).value = value
+  $('level-' + which + '-text').textContent = value + '%'
+}
+
+function sendLevel(which) {
+  levelTimers[which] = null
+  const body = {}
+  body[which] = Number($('level-' + which).value)
+  api('/api/levels', body).catch((e) => showError(e.message))
+}
+
+function bindLevel(which) {
+  const input = $('level-' + which)
+  input.oninput = () => {
+    levelBusyUntil = Date.now() + 1500
+    $('level-' + which + '-text').textContent = input.value + '%'
+    if (!levelTimers[which]) levelTimers[which] = setTimeout(() => sendLevel(which), 150)
+  }
+  input.onchange = () => {
+    levelBusyUntil = Date.now() + 1500
+    clearTimeout(levelTimers[which])
+    sendLevel(which)
+  }
+}
+bindLevel('speaker')
+bindLevel('mic')
+
+function renderAudio() {
+  const rec = state.recording || { active: false, mode: '', startedAt: 0, playing: '' }
+  const busy = !!rec.active
+  const onCall = state.call === 'active'
+  $('rec-start').hidden = busy && rec.mode === 'record'
+  $('rec-stop').hidden = !(busy && rec.mode === 'record')
+  $('rec-start').disabled = busy || onCall
+  $('aec-test').disabled = busy || onCall
+  $('aec-apply').disabled = busy || onCall || !state.aecReady
+  if (busy && rec.mode === 'test') $('rec-time').textContent = '正在对比处理前和处理后…'
+  else if (busy && rec.mode === 'record' && rec.startedAt) $('rec-time').textContent = fmtDuration((Date.now() - rec.startedAt) / 1000)
+  else if (!busy) $('rec-time').textContent = ''
+
+  const items = state.recordings || []
+  const list = $('recordings')
+  const key = JSON.stringify([items, rec.playing, busy])
+  $('rec-empty').hidden = items.length > 0
+  if (list.dataset.key !== key) {
+    list.dataset.key = key
+    list.innerHTML = ''
+    for (const item of items) {
+      const li = document.createElement('li')
+      const box = document.createElement('div')
+      box.className = 'info'
+      const title = document.createElement('div')
+      title.className = 'title'
+      title.textContent = item.label + ' · ' + item.name
+      const sub = document.createElement('div')
+      sub.className = 'sub muted'
+      const clock = document.createElement('span')
+      clock.className = 'rec-clock'
+      clock.dataset.recClock = item.name
+      clock.dataset.seconds = item.duration || 0
+      clock.textContent = item.duration ? fmtDuration(item.duration) : ''
+      sub.append(clock)
+      if (item.size) sub.append(document.createTextNode((clock.textContent ? ' · ' : '') + fmtSize(item.size)))
+      box.append(title, sub)
+      const play = document.createElement('button')
+      const playing = rec.playing === item.name
+      play.textContent = playing ? '停止' : '播放'
+      if (playing) play.classList.add('primary')
+      play.disabled = busy
+      play.onclick = () => run(() => api(playing ? '/api/recordings/stop' : '/api/recordings/play', playing ? {} : { name: item.name }))
+      const down = document.createElement('a')
+      down.className = 'button'
+      down.href = '/api/recordings/' + encodeURIComponent(item.name)
+      down.setAttribute('download', item.name)
+      down.textContent = '下载'
+      const del = document.createElement('button')
+      del.className = 'danger'
+      del.textContent = '删除'
+      del.disabled = busy
+      del.onclick = () => {
+        if (!confirm('删除这段录音？')) return
+        run(() => api('/api/recordings/delete', { name: item.name }))
+      }
+      li.append(box, play, down, del)
+      list.append(li)
+    }
+  }
+
+  if (Date.now() > levelBusyUntil && state.levels) {
+    showLevel('speaker', state.levels.speaker)
+    showLevel('mic', state.levels.mic)
+  }
+  $('level-error').textContent = state.levelsError || ''
+  $('level-speaker').disabled = $('level-mic').disabled = !state.levels
+
+  const unsupported = state.aecSupported || null
+  if (Date.now() > aecDirtyUntil && state.aec) {
+    for (const input of document.querySelectorAll('#aec-checks input')) {
+      const missing = unsupported && unsupported.indexOf(input.dataset.aec) < 0
+      input.checked = missing ? false : !!state.aec[input.dataset.aec]
+      input.disabled = missing || !state.aecReady || busy || onCall
+    }
+  }
+  const missingNote = unsupported && unsupported.indexOf('delay_agnostic') < 0
+    ? '延迟自适应这套 PulseAudio 不支持。' : ''
+  $('aec-note').textContent = state.aecError || missingNote || (state.aecReady ? '' : '没有找到回声消除，无法调整')
+}
+
+for (const input of document.querySelectorAll('#aec-checks input')) {
+  input.onchange = () => { aecDirtyUntil = Date.now() + 20000 }
+}
+$('rec-start').onclick = () => run(() => api('/api/record/start'))
+$('rec-stop').onclick = () => run(() => api('/api/record/stop'))
+$('aec-test').onclick = () => run(() => api('/api/record/test'))
+$('aec-apply').onclick = () => run(async () => {
+  const body = {}
+  for (const input of document.querySelectorAll('#aec-checks input')) body[input.dataset.aec] = input.checked
+  aecDirtyUntil = 0
+  const data = await api('/api/aec', body)
+  if (data.warning) showError(data.warning)
+})
+
+function renderPlayClock() {
+  const rec = state.recording || {}
+  for (const el of document.querySelectorAll('[data-rec-clock]')) {
+    const total = Number(el.dataset.seconds || 0)
+    const playing = rec.playing === el.dataset.recClock && rec.playStartedAt && !rec.active
+    if (!playing) {
+      el.textContent = total ? fmtDuration(total) : ''
+      continue
+    }
+    let elapsed = (Date.now() - rec.playStartedAt) / 1000
+    if (total) elapsed = Math.min(elapsed, total)
+    el.textContent = fmtDuration(elapsed) + (total ? ' / ' + fmtDuration(total) : '')
+  }
+}
+
+setInterval(() => {
+  const rec = state.recording
+  if (rec && rec.active && rec.mode === 'record' && rec.startedAt) {
+    $('rec-time').textContent = fmtDuration((Date.now() - rec.startedAt) / 1000)
+  }
+  renderPlayClock()
+}, 250)
+
+let micBusy = false
+async function refreshMic() {
+  if (micBusy) return
+  micBusy = true
+  try {
+    const res = await fetch('/api/mic')
+    const data = await res.json()
+    const box = $('mic-meter-box')
+    $('mic-meter').style.width = Math.max(0, Math.min(100, data.level || 0)) + '%'
+    box.classList.toggle('hot', !!data.heard)
+    $('mic-text').textContent = data.error || (data.heard ? ('声卡有声音 · 峰值 ' + data.peak) : '声卡没有送来声音')
+  } catch (e) {
+    $('mic-text').textContent = '检测中断'
+  }
+  micBusy = false
+}
+refreshMic()
+setInterval(refreshMic, 300)
 
 function upload(fileList) {
   const files = [], skipped = []

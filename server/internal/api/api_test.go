@@ -452,6 +452,168 @@ func TestAdminUsersAndVolume(t *testing.T) {
 	}
 }
 
+func TestShareLogin(t *testing.T) {
+	ts, st, _ := setup(t)
+	ctx := context.Background()
+	hash, _ := auth.HashPassword("password123")
+	if err := st.UpsertUser(ctx, "root", hash); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetRole(ctx, "root", "admin"); err != nil {
+		t.Fatal(err)
+	}
+	_, root := login(t, ts.URL, "root", "password123")
+
+	resp := authed(t, http.MethodPost, ts.URL+"/api/admin/users", root, `{"username":"bob","password":"password123"}`)
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create status %d", resp.StatusCode)
+	}
+	var created struct {
+		Username string `json:"username"`
+		Share    string `json:"share"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&created); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if created.Username != "bob" || created.Share == "" || strings.Contains(created.Share, "password123") {
+		t.Fatalf("share response %+v", created)
+	}
+
+	postLink := func(username, share string) *http.Response {
+		t.Helper()
+		body, _ := json.Marshal(map[string]string{"username": username, "share": share})
+		resp, err := http.Post(ts.URL+"/api/login-link", "application/json", bytes.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+
+	resp = postLink("bob", created.Share)
+	var session map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&session); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || session["token"] == "" || session["username"] != "bob" {
+		t.Fatalf("login-link %d %+v", resp.StatusCode, session)
+	}
+
+	resp = postLink("alice", created.Share)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("swapped username status %d", resp.StatusCode)
+	}
+
+	resp = postLink("bob", "not-a-token")
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("garbage share status %d", resp.StatusCode)
+	}
+
+	_, alice := login(t, ts.URL, "alice", "password123")
+	resp = authed(t, http.MethodPost, ts.URL+"/api/admin/users/bob/share", alice, `{"days":1}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("user share status %d", resp.StatusCode)
+	}
+	resp = authed(t, http.MethodPost, ts.URL+"/api/admin/users/bob/password", alice, `{"password":"anotherpass99"}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("user password status %d", resp.StatusCode)
+	}
+	resp = authed(t, http.MethodPost, ts.URL+"/api/admin/users/missing/share", root, `{"days":1}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("missing user share status %d", resp.StatusCode)
+	}
+	resp = authed(t, http.MethodPost, ts.URL+"/api/admin/users/bob/share", root, `{"days":-1}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("negative days status %d", resp.StatusCode)
+	}
+
+	resp = authed(t, http.MethodPost, ts.URL+"/api/admin/users/bob/share", root, `{"days":1}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("reissue status %d", resp.StatusCode)
+	}
+	var reissued struct {
+		Share string `json:"share"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&reissued); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	resp = postLink("bob", created.Share)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("old link after reissue status %d", resp.StatusCode)
+	}
+	resp = postLink("bob", reissued.Share)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("new link status %d", resp.StatusCode)
+	}
+
+	resp = authed(t, http.MethodPost, ts.URL+"/api/admin/users/bob/share", root, `{"days":0}`)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unlimited share status %d", resp.StatusCode)
+	}
+	var unlimited struct {
+		Share string `json:"share"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&unlimited); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	resp = postLink("bob", reissued.Share)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("previous link after unlimited reissue status %d", resp.StatusCode)
+	}
+	resp = postLink("bob", unlimited.Share)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unlimited login status %d", resp.StatusCode)
+	}
+
+	expired, err := auth.SealShareUntil("bob", 1, time.Now().Unix()-10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp = postLink("bob", expired)
+	var expiredBody struct {
+		Error string `json:"error"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&expiredBody); err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest || expiredBody.Error != "share link expired" {
+		t.Fatalf("expired link %d %q", resp.StatusCode, expiredBody.Error)
+	}
+
+	resp = authed(t, http.MethodPost, ts.URL+"/api/admin/users/bob/password", root, `{"password":"short"}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("short password status %d", resp.StatusCode)
+	}
+	resp = authed(t, http.MethodPost, ts.URL+"/api/admin/users/bob/password", root, `{"password":"anotherpass99"}`)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("set password status %d", resp.StatusCode)
+	}
+	resp = postLink("bob", unlimited.Share)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Fatalf("old link after password change status %d", resp.StatusCode)
+	}
+	if code, _ := login(t, ts.URL, "bob", "anotherpass99"); code != http.StatusOK {
+		t.Fatalf("new password login status %d", code)
+	}
+}
+
 func TestUnauthorized(t *testing.T) {
 	ts, _, _ := setup(t)
 	resp, err := http.Get(ts.URL + "/api/devices")

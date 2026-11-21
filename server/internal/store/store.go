@@ -26,6 +26,7 @@ type User struct {
 	PasswordHash string
 	Role         string
 	SessionID    string
+	ShareGen     int64
 	CreatedAt    time.Time
 }
 
@@ -113,6 +114,7 @@ func (s *Store) migrate(ctx context.Context) error {
 	defer rows.Close()
 	hasRole := false
 	hasSession := false
+	hasShareGen := false
 	for rows.Next() {
 		var cid int
 		var name, ctype string
@@ -126,6 +128,8 @@ func (s *Store) migrate(ctx context.Context) error {
 			hasRole = true
 		case "session_id":
 			hasSession = true
+		case "share_gen":
+			hasShareGen = true
 		}
 	}
 	if err := rows.Err(); err != nil {
@@ -139,6 +143,11 @@ func (s *Store) migrate(ctx context.Context) error {
 	if !hasSession {
 		if _, err := s.db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN session_id TEXT NOT NULL DEFAULT ''`); err != nil {
 			return fmt.Errorf("migrate users.session_id: %w", err)
+		}
+	}
+	if !hasShareGen {
+		if _, err := s.db.ExecContext(ctx, `ALTER TABLE users ADD COLUMN share_gen INTEGER NOT NULL DEFAULT 0`); err != nil {
+			return fmt.Errorf("migrate users.share_gen: %w", err)
 		}
 	}
 	// 参与者不足两人的记录没有真正接通，清掉误写的接通时间。
@@ -173,7 +182,7 @@ func fromUnix(v sql.NullInt64) *time.Time {
 func (s *Store) UpsertUser(ctx context.Context, username, passwordHash string) error {
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO users(username, password_hash, created_at) VALUES(?, ?, ?)
-		ON CONFLICT(username) DO UPDATE SET password_hash = excluded.password_hash`,
+		ON CONFLICT(username) DO UPDATE SET password_hash = excluded.password_hash, share_gen = share_gen + 1`,
 		username, passwordHash, unix(time.Now()))
 	return err
 }
@@ -181,8 +190,8 @@ func (s *Store) UpsertUser(ctx context.Context, username, passwordHash string) e
 func (s *Store) GetUser(ctx context.Context, username string) (*User, error) {
 	var u User
 	var created int64
-	err := s.db.QueryRowContext(ctx, `SELECT username, password_hash, role, session_id, created_at FROM users WHERE username = ?`, username).
-		Scan(&u.Username, &u.PasswordHash, &u.Role, &u.SessionID, &created)
+	err := s.db.QueryRowContext(ctx, `SELECT username, password_hash, role, session_id, share_gen, created_at FROM users WHERE username = ?`, username).
+		Scan(&u.Username, &u.PasswordHash, &u.Role, &u.SessionID, &u.ShareGen, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -194,6 +203,29 @@ func (s *Store) GetUser(ctx context.Context, username string) (*User, error) {
 		u.Role = "user"
 	}
 	return &u, nil
+}
+
+// SetPassword 更新密码，并让该用户已签发的分享链接失效。当前登录会话保持不变。
+func (s *Store) SetPassword(ctx context.Context, username, passwordHash string) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE users SET password_hash = ?, share_gen = share_gen + 1 WHERE username = ?`, passwordHash, username)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+// NextShareGen 签发一条新链接时把序号加一。旧链接因序号不同而失效。
+func (s *Store) NextShareGen(ctx context.Context, username string) (int64, error) {
+	var gen int64
+	err := s.db.QueryRowContext(ctx, `UPDATE users SET share_gen = share_gen + 1 WHERE username = ? RETURNING share_gen`, username).Scan(&gen)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrNotFound
+	}
+	return gen, err
 }
 
 func (s *Store) SetSession(ctx context.Context, username, sid string) error {

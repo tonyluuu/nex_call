@@ -32,6 +32,7 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
 	mux.HandleFunc("POST /api/login", s.login)
+	mux.HandleFunc("POST /api/login-link", s.loginLink)
 	mux.HandleFunc("GET /api/me", s.requireUser(s.me))
 	mux.HandleFunc("GET /api/devices", s.requireUser(s.listDevices))
 	mux.HandleFunc("GET /api/calls", s.requireUser(s.listCalls))
@@ -39,6 +40,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/admin/kick", s.requireAdmin(s.kick))
 	mux.HandleFunc("GET /api/admin/users", s.requireAdmin(s.listUsers))
 	mux.HandleFunc("POST /api/admin/users", s.requireAdmin(s.createUser))
+	mux.HandleFunc("POST /api/admin/users/{username}/share", s.requireAdmin(s.shareUser))
+	mux.HandleFunc("POST /api/admin/users/{username}/password", s.requireAdmin(s.setUserPassword))
 	mux.HandleFunc("DELETE /api/admin/users/{username}", s.requireAdmin(s.deleteUser))
 	mux.HandleFunc("POST /api/admin/devices/{id}/volume", s.requireAdmin(s.setVolume))
 	mux.HandleFunc("GET /ws/web", s.wsWeb)
@@ -136,13 +139,56 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bad request")
 		return
 	}
+	s.completeLogin(w, r, req.Username, req.Password)
+}
+
+func (s *Server) loginLink(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Username string `json:"username"`
+		Share    string `json:"share"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad request")
+		return
+	}
 	ip := clientIP(r)
 	if !s.limiter.allow(ip) {
 		writeErr(w, http.StatusTooManyRequests, "too many attempts, try later")
 		return
 	}
-	u, err := s.Store.GetUser(r.Context(), req.Username)
-	if err != nil || !auth.CheckPassword(u.PasswordHash, req.Password) {
+	user, gen, err := auth.OpenShare(req.Share)
+	if errors.Is(err, auth.ErrShareExpired) {
+		s.limiter.fail(ip)
+		writeErr(w, http.StatusBadRequest, "share link expired")
+		return
+	}
+	if err != nil || user != req.Username {
+		s.limiter.fail(ip)
+		writeErr(w, http.StatusBadRequest, "invalid share link")
+		return
+	}
+	u, err := s.Store.GetUser(r.Context(), user)
+	if err != nil || u.ShareGen != gen {
+		if err != nil && !errors.Is(err, store.ErrNotFound) {
+			slog.Error("get user", "err", err)
+			writeErr(w, http.StatusInternalServerError, "internal error")
+			return
+		}
+		s.limiter.fail(ip)
+		writeErr(w, http.StatusBadRequest, "invalid share link")
+		return
+	}
+	s.issueSession(w, r, u)
+}
+
+func (s *Server) completeLogin(w http.ResponseWriter, r *http.Request, username, password string) {
+	ip := clientIP(r)
+	if !s.limiter.allow(ip) {
+		writeErr(w, http.StatusTooManyRequests, "too many attempts, try later")
+		return
+	}
+	u, err := s.Store.GetUser(r.Context(), username)
+	if err != nil || !auth.CheckPassword(u.PasswordHash, password) {
 		if err != nil && !errors.Is(err, store.ErrNotFound) {
 			slog.Error("get user", "err", err)
 		}
@@ -150,7 +196,11 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "invalid username or password")
 		return
 	}
-	s.limiter.reset(ip)
+	s.issueSession(w, r, u)
+}
+
+func (s *Server) issueSession(w http.ResponseWriter, r *http.Request, u *store.User) {
+	s.limiter.reset(clientIP(r))
 	sid, err := auth.NewSessionID()
 	if err != nil {
 		slog.Error("session id", "err", err)
@@ -265,6 +315,7 @@ type userView struct {
 	Username  string    `json:"username"`
 	Role      string    `json:"role"`
 	CreatedAt time.Time `json:"createdAt"`
+	Share     string    `json:"share,omitempty"`
 }
 
 func toUserView(u store.User) userView {
@@ -292,10 +343,18 @@ func validUsername(name string) bool {
 	return !strings.ContainsAny(name, ": \t\r\n")
 }
 
+func shareDays(days *int) (int, bool) {
+	if days == nil {
+		return 1, true
+	}
+	return *days, auth.ValidShareDays(*days)
+}
+
 func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
+		Days     *int   `json:"days"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "bad request")
@@ -307,6 +366,11 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(req.Password) < 8 {
 		writeErr(w, http.StatusBadRequest, "password must be at least 8 characters")
+		return
+	}
+	days, ok := shareDays(req.Days)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid share days")
 		return
 	}
 	hash, err := auth.HashPassword(req.Password)
@@ -330,7 +394,85 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	writeJSON(w, http.StatusCreated, toUserView(*u))
+	gen, err := s.Store.NextShareGen(r.Context(), req.Username)
+	if err != nil {
+		slog.Error("share generation", "err", err)
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	share, err := auth.SealShare(req.Username, gen, days)
+	if err != nil {
+		slog.Error("seal share link", "err", err)
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	view := toUserView(*u)
+	view.Share = share
+	writeJSON(w, http.StatusCreated, view)
+}
+
+func (s *Server) shareUser(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("username")
+	var req struct {
+		Days *int `json:"days"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad request")
+		return
+	}
+	days, ok := shareDays(req.Days)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid share days")
+		return
+	}
+	gen, err := s.Store.NextShareGen(r.Context(), name)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "not found")
+			return
+		}
+		slog.Error("share generation", "err", err)
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	share, err := auth.SealShare(name, gen, days)
+	if err != nil {
+		slog.Error("seal share link", "err", err)
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"share": share})
+}
+
+func (s *Server) setUserPassword(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("username")
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "bad request")
+		return
+	}
+	if len(req.Password) < 8 {
+		writeErr(w, http.StatusBadRequest, "password must be at least 8 characters")
+		return
+	}
+	hash, err := auth.HashPassword(req.Password)
+	if err != nil {
+		slog.Error("hash password", "err", err)
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if err := s.Store.SetPassword(r.Context(), name, hash); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "not found")
+			return
+		}
+		slog.Error("set password", "err", err)
+		writeErr(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"ok": "true"})
 }
 
 func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
